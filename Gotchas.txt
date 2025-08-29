@@ -17,3 +17,4 @@ The build output will suggest that there is not enough disk space but stopping v
 
 Running the HotReloadApp.exe stand alone, without attached debugging allow for
 calling BuildPluginDll.bat repeatedly, resulting in continous recompiling and automatic dll reloading.
+*May only be an issue when multi threaded, using a background thread or OS callback to asynchronously poll OS for directory changes*

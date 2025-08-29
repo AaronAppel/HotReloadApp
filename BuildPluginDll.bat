@@ -7,7 +7,7 @@ rem msbuild MySolution.sln /t:MyProjectName /p:Configuration=Debug /p:Platform="
 rem msbuild MyProject\MyProject.vcxproj /p:Configuration=Release
 %msbuildPath% %vcxProjectPath% /p:Configuration=Debug /p:Platform="x64"
 
-rem IF !errorlevel! NEQ 0 (goto error)
+IF !errorlevel! NEQ 0 (goto error)
 
 IF EXIST "B:\HotReloadApp\Plugin\x64\Debug\Plugin.dll" (
 	goto :end
@@ -16,11 +16,12 @@ IF EXIST "B:\HotReloadApp\Plugin\x64\Debug\Plugin.dll" (
 :error
 echo May have encountered error(s)
 pause
-exit /B 1
+rem exit /B 1
 
 :end
 echo Successfully built Plugin.dll
 rem pause
 echo Copying Plugin.dll
-rem F| to specify as a file and avoid prompting user for 'F' or 'D'
-F|xcopy "B:\HotReloadApp\Plugin\x64\Debug\Plugin.dll" "B:\HotReloadApp\x64\Debug\Plugin.dll" /Y
+rem Stopped working: F|xcopy to specify as a file and avoid prompting user for 'F' or 'D'
+xcopy "B:\HotReloadApp\Plugin\x64\Debug\Plugin.dll" "B:\HotReloadApp\x64\Debug\Plugin.dll" /Y
+pause
