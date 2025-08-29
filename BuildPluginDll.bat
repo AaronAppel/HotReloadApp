@@ -9,7 +9,9 @@ rem msbuild MyProject\MyProject.vcxproj /p:Configuration=Release
 
 rem IF !errorlevel! NEQ 0 (goto error)
 
-goto :end
+IF EXIST "B:\HotReloadApp\Plugin\x64\Debug\Plugin.dll" (
+	goto :end
+)
 
 :error
 echo May have encountered error(s)
@@ -20,4 +22,5 @@ exit /B 1
 echo Successfully built Plugin.dll
 rem pause
 echo Copying Plugin.dll
-xcopy "B:\HotReloadApp\Plugin\x64\Debug\Plugin.dll" "B:\HotReloadApp\x64\Debug\Plugin.dll" /Y
+rem F| to specify as a file and avoid prompting user for 'F' or 'D'
+F|xcopy "B:\HotReloadApp\Plugin\x64\Debug\Plugin.dll" "B:\HotReloadApp\x64\Debug\Plugin.dll" /Y

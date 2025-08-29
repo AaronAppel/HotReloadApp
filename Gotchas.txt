@@ -1,0 +1,19 @@
+// Debug directories
+Remember that Visual Studio will build HotReloadApp files into:
+B:\HotReloadApp\x64\Debug
+and Plugin files into:
+B:\HotReloadApp\Plugin\x64\Debug
+so a copy is required to get the newest Plugin.dll file over to where the HotReloadApp.exe expects
+Plugin.dll to be. Perhaps the file watch thread to look for a new Plugin.dll in the Plugin\x64\Debug folder
+and trigger a file copy in C++ code, instead of using .bat files. Eventually...
+
+// -- Locked .pdb file --
+The file:
+...\HotReloadApp\Plugin\x64\Debug\Plugin.pdb
+Can get locked by Visual Studio, or MSBuild, or something,
+when the BuildPluginDll.bat executes the 1st time, IF also debugging through Visual Studio.
+This means future compilations will fail as the file is not modifiable.
+The build output will suggest that there is not enough disk space but stopping visual studio.
+
+Running the HotReloadApp.exe stand alone, without attached debugging allow for
+calling BuildPluginDll.bat repeatedly, resulting in continous recompiling and automatic dll reloading.
