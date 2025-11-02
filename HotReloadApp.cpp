@@ -116,7 +116,7 @@ int main() {
 
     while (true) {
         // Allow the OS to execute completion routines (APC) via alertable sleep
-        SleepEx(100, TRUE);
+        SleepEx(100, TRUE); // #TODO Avoid SleepEx by overlapping ReadDirectoryChangesW calls so OS threads work instead
 
         if (pluginChanged || !hLib) {
             pluginChanged = false;
