@@ -1,5 +1,6 @@
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include <windows.h>
 
@@ -9,6 +10,7 @@ std::wstring LibFileRelativeDirectory()
     {
         return L"x64\\Debug";
     }
+
     return L".";
 }
 
@@ -21,6 +23,7 @@ std::wstring PluginOutputDirectory()
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <mutex>
 #include <winnt.h>
 
 bool BuildPlugin()
@@ -67,7 +70,10 @@ bool BuildPlugin()
     WaitForSingleObject(pi.hProcess, INFINITE);
 
     DWORD exitCode = 1;
-    GetExitCodeProcess(pi.hProcess, &exitCode);
+
+    GetExitCodeProcess(
+        pi.hProcess,
+        &exitCode);
 
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
@@ -75,21 +81,37 @@ bool BuildPlugin()
     return exitCode == 0;
 }
 
-std::atomic<bool> sourceChanged = false;
-std::atomic<bool> pluginChanged = false;
-std::atomic<bool> buildInProgress = false;
-std::atomic<bool> reloadInProgress = false;
-std::chrono::steady_clock::time_point lastSourceChangeTime;
+enum class BuildState
+{
+    Idle,
+    Pending,
+    Building,
+    ReadyToLoad,
+    Failed
+};
 
-const std::wstring libFileName = L"Plugin.dll";
-const std::wstring cppFileName = L"Plugin.cpp";
+std::atomic<bool> sourceChanged = false;
+std::atomic<bool> reloadInProgress = false;
+
+std::atomic<BuildState> g_buildState =
+BuildState::Idle;
+
+std::chrono::steady_clock::time_point
+lastSourceChangeTime;
 
 uint64_t g_reloadCounter = 0;
+
 std::filesystem::path currentLoadedDllPath;
+
+std::mutex g_readyDllMutex;
+
+std::filesystem::path g_readyDllPath;
+std::filesystem::path g_readyPdbPath;
 
 std::filesystem::path GenerateTempDllPath()
 {
-    auto tempDir = std::filesystem::temp_directory_path();
+    auto tempDir =
+        std::filesystem::temp_directory_path();
 
     std::wstring filename =
         L"plugin_hotreload_" +
@@ -101,10 +123,13 @@ std::filesystem::path GenerateTempDllPath()
     return tempDir / filename;
 }
 
-std::filesystem::path GetPdbPath(const std::filesystem::path& dllPath)
+std::filesystem::path GetPdbPath(
+    const std::filesystem::path& dllPath)
 {
     auto pdb = dllPath;
+
     pdb.replace_extension(L".pdb");
+
     return pdb;
 }
 
@@ -113,34 +138,32 @@ bool WaitForFileReady(
     std::chrono::milliseconds timeout =
     std::chrono::seconds(5))
 {
-    auto start = std::chrono::steady_clock::now();
+    auto start =
+        std::chrono::steady_clock::now();
 
     while (true)
     {
-        // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew
-#define    FILE_SHARE_NONE 0
-        // 0                    = 0 (Exclusive lock)
-        // FILE_SHARE_READ      = 1 (Allow read)
-        // FILE_SHARE_WRITE     = 2 (Allow write)
-        // FILE_SHARE_DELETE    = 4 (Allow deletion)
-        HANDLE file = CreateFileW(
-            path.c_str(),
-            GENERIC_READ,
-            FILE_SHARE_NONE,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            nullptr);
+#define FILE_SHARE_NONE 0
+
+        HANDLE file =
+            CreateFileW(
+                path.c_str(),
+                GENERIC_READ,
+                FILE_SHARE_NONE,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                nullptr);
 
         if (file != INVALID_HANDLE_VALUE)
         {
             CloseHandle(file);
+
             return true;
         }
 
         DWORD error = GetLastError();
 
-        // Optional diagnostics
         if (error != ERROR_SHARING_VIOLATION &&
             error != ERROR_LOCK_VIOLATION)
         {
@@ -165,9 +188,11 @@ bool WaitForFileStable(
     std::chrono::milliseconds timeout =
     std::chrono::seconds(5))
 {
-    auto start = std::chrono::steady_clock::now();
+    auto start =
+        std::chrono::steady_clock::now();
 
     uintmax_t lastSize = 0;
+
     int stableCount = 0;
 
     while (true)
@@ -176,7 +201,10 @@ bool WaitForFileStable(
 
         if (std::filesystem::exists(path, ec))
         {
-            auto size = std::filesystem::file_size(path, ec);
+            auto size =
+                std::filesystem::file_size(
+                    path,
+                    ec);
 
             if (!ec)
             {
@@ -184,7 +212,6 @@ bool WaitForFileStable(
                 {
                     stableCount++;
 
-                    // Require stability across several checks
                     if (stableCount >= 3)
                     {
                         return true;
@@ -212,7 +239,9 @@ using run_func = void(*)();
 
 #include "Mirror/MIR_Mirror.h"
 #include "Plugin/Plugin.h"
-using classInfo_func = Mirror::TypeInfo*(*)();
+
+using classInfo_func =
+Mirror::TypeInfo* (*)();
 
 enum class WatchType
 {
@@ -220,10 +249,15 @@ enum class WatchType
     Output
 };
 
-struct WatchContext {
+struct WatchContext
+{
     OVERLAPPED overlapped = {};
+
     char buffer[1024];
-    HANDLE dirHandle = INVALID_HANDLE_VALUE;
+
+    HANDLE dirHandle =
+        INVALID_HANDLE_VALUE;
+
     WatchType type;
 };
 
@@ -232,20 +266,27 @@ bool HasExtension(
     const std::wstring& ext)
 {
     if (filename.length() < ext.length())
+    {
         return false;
+    }
 
     return filename.ends_with(ext);
 }
 
-// Completion routine called by the OS when a directory change occurs
-void CALLBACK DirectoryChangeCallback(DWORD errorCode, DWORD bytesTransferred, LPOVERLAPPED lpOverlapped) {
-
+void CALLBACK DirectoryChangeCallback(
+    DWORD errorCode,
+    DWORD bytesTransferred,
+    LPOVERLAPPED lpOverlapped)
+{
     auto* context =
         CONTAINING_RECORD(
             lpOverlapped,
             WatchContext,
             overlapped);
-    BYTE* base = reinterpret_cast<BYTE*>(context->buffer);
+
+    BYTE* base =
+        reinterpret_cast<BYTE*>(
+            context->buffer);
 
     if (errorCode != ERROR_SUCCESS)
     {
@@ -256,8 +297,6 @@ void CALLBACK DirectoryChangeCallback(DWORD errorCode, DWORD bytesTransferred, L
     }
     else if (bytesTransferred > 0)
     {
-        // Process notifications
-
         while (true)
         {
             FILE_NOTIFY_INFORMATION* fni =
@@ -265,7 +304,8 @@ void CALLBACK DirectoryChangeCallback(DWORD errorCode, DWORD bytesTransferred, L
 
             std::wstring changedFile(
                 fni->FileName,
-                fni->FileNameLength / sizeof(WCHAR));
+                fni->FileNameLength /
+                sizeof(WCHAR));
 
             std::wcout
                 << L"[INFO] Action "
@@ -274,18 +314,11 @@ void CALLBACK DirectoryChangeCallback(DWORD errorCode, DWORD bytesTransferred, L
                 << changedFile
                 << std::endl;
 
-            if (context->type == WatchType::Output)
+            if (context->type ==
+                WatchType::Source)
             {
-                if (HasExtension(changedFile, L".dll"))
-                {
-                    pluginChanged = true;
-                }
-            }
-            else if (context->type == WatchType::Source)
-            {
-                if (true ||
-                    HasExtension(changedFile, L".h") ||
-                    HasExtension(changedFile, L".cpp"))
+                if (HasExtension(changedFile, L".cpp") ||
+                    HasExtension(changedFile, L".h"))
                 {
                     sourceChanged = true;
 
@@ -303,87 +336,247 @@ void CALLBACK DirectoryChangeCallback(DWORD errorCode, DWORD bytesTransferred, L
         }
     }
 
-    // Re-issue the directory watch
-    ZeroMemory(&context->overlapped, sizeof(OVERLAPPED));
-    BOOL success = ReadDirectoryChangesW(
-        context->dirHandle,
-        context->buffer,
-        sizeof(context->buffer),
-        TRUE, // Watch subdirs
-        FILE_NOTIFY_CHANGE_FILE_NAME |
-        FILE_NOTIFY_CHANGE_LAST_WRITE,
-        nullptr,
+    ZeroMemory(
         &context->overlapped,
-        DirectoryChangeCallback
-    );
+        sizeof(OVERLAPPED));
 
-    if (!success) {
-        std::cerr << "Failed to re-issue directory changes watch: " << GetLastError() << std::endl;
+    BOOL success =
+        ReadDirectoryChangesW(
+            context->dirHandle,
+            context->buffer,
+            sizeof(context->buffer),
+            TRUE,
+            FILE_NOTIFY_CHANGE_FILE_NAME |
+            FILE_NOTIFY_CHANGE_LAST_WRITE,
+            nullptr,
+            &context->overlapped,
+            DirectoryChangeCallback);
+
+    if (!success)
+    {
+        std::cerr
+            << "[ERROR] Failed to re-issue watch: "
+            << GetLastError()
+            << std::endl;
+
         CloseHandle(context->dirHandle);
     }
 }
 
-bool setupFileWatcher(WatchContext& context, const std::wstring& directory, WatchType type, bool watchSubDirs = true)
+bool setupFileWatcher(
+    WatchContext& context,
+    const std::wstring& directory,
+    WatchType type,
+    bool watchSubDirs = true)
 {
     context.type = type;
-    context.dirHandle = CreateFileW(
-        directory.c_str(),
-        FILE_LIST_DIRECTORY,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-        nullptr
-    );
 
-    if (context.dirHandle == INVALID_HANDLE_VALUE) {
-        std::cerr << "Failed to create directory handle for watching: " << GetLastError() << std::endl;
+    context.dirHandle =
+        CreateFileW(
+            directory.c_str(),
+            FILE_LIST_DIRECTORY,
+            FILE_SHARE_READ |
+            FILE_SHARE_WRITE |
+            FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS |
+            FILE_FLAG_OVERLAPPED,
+            nullptr);
+
+    if (context.dirHandle ==
+        INVALID_HANDLE_VALUE)
+    {
+        std::cerr
+            << "[ERROR] Failed to create watch handle: "
+            << GetLastError()
+            << std::endl;
+
         return false;
     }
 
-    ZeroMemory(&context.overlapped, sizeof(OVERLAPPED));
-
-    BOOL success = ReadDirectoryChangesW(
-        context.dirHandle,
-        context.buffer,
-        sizeof(context.buffer),
-        (int)watchSubDirs,
-        FILE_NOTIFY_CHANGE_FILE_NAME |
-        FILE_NOTIFY_CHANGE_LAST_WRITE,
-        nullptr,
+    ZeroMemory(
         &context.overlapped,
-        DirectoryChangeCallback
-    );
+        sizeof(OVERLAPPED));
 
-    if (!success) {
-        std::cerr << "Failed to initiate directory changes watch: " << GetLastError() << std::endl;
+    BOOL success =
+        ReadDirectoryChangesW(
+            context.dirHandle,
+            context.buffer,
+            sizeof(context.buffer),
+            (int)watchSubDirs,
+            FILE_NOTIFY_CHANGE_FILE_NAME |
+            FILE_NOTIFY_CHANGE_LAST_WRITE,
+            nullptr,
+            &context.overlapped,
+            DirectoryChangeCallback);
+
+    if (!success)
+    {
+        std::cerr
+            << "[ERROR] Failed to initiate watch: "
+            << GetLastError()
+            << std::endl;
+
         CloseHandle(context.dirHandle);
+
         return false;
     }
 
     return true;
 }
 
+void BuildWorkerThread(
+    const std::filesystem::path& libFilePath,
+    const std::filesystem::path& pdbPath)
+{
+    while (true)
+    {
+        if (g_buildState ==
+            BuildState::Pending)
+        {
+            g_buildState =
+                BuildState::Building;
+
+            std::cout
+                << "[INFO] Rebuilding plugin..."
+                << std::endl;
+
+            bool buildSuccess =
+                BuildPlugin();
+
+            if (!buildSuccess)
+            {
+                std::cerr
+                    << "[ERROR] Plugin build failed."
+                    << std::endl;
+
+                g_buildState =
+                    BuildState::Failed;
+
+                continue;
+            }
+
+            if (!WaitForFileReady(libFilePath))
+            {
+                std::cerr
+                    << "[ERROR] DLL never became ready."
+                    << std::endl;
+
+                g_buildState =
+                    BuildState::Failed;
+
+                continue;
+            }
+
+            if (!WaitForFileStable(pdbPath))
+            {
+                std::cerr
+                    << "[ERROR] PDB never became stable."
+                    << std::endl;
+
+                g_buildState =
+                    BuildState::Failed;
+
+                continue;
+            }
+
+            //
+            // Copy DLL + PDB HERE
+            //
+
+            auto tempDll =
+                GenerateTempDllPath();
+
+            auto tempPdb =
+                GetPdbPath(tempDll);
+
+            try
+            {
+                std::filesystem::copy_file(
+                    libFilePath,
+                    tempDll,
+                    std::filesystem::copy_options::overwrite_existing);
+            }
+            catch (const std::exception& e)
+            {
+                std::cerr
+                    << "[ERROR] Failed to copy DLL: "
+                    << e.what()
+                    << std::endl;
+
+                g_buildState =
+                    BuildState::Failed;
+
+                continue;
+            }
+
+            std::error_code ec;
+
+            if (!std::filesystem::copy_file(
+                pdbPath,
+                tempPdb,
+                std::filesystem::copy_options::overwrite_existing,
+                ec))
+            {
+                std::cerr
+                    << "[ERROR] Failed to copy PDB: "
+                    << ec.message()
+                    << std::endl;
+
+                g_buildState =
+                    BuildState::Failed;
+
+                continue;
+            }
+
+            {
+                std::scoped_lock lock(
+                    g_readyDllMutex);
+
+                g_readyDllPath = tempDll;
+                g_readyPdbPath = tempPdb;
+            }
+
+            std::cout
+                << "[INFO] Plugin build succeeded."
+                << std::endl;
+
+            g_buildState =
+                BuildState::ReadyToLoad;
+        }
+
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(10));
+    }
+}
+
 int main()
 {
-    // #TODO Multi-thread to do work on separate thread and the main thread can just reload the already build DLL
-
-    // Clean up previous temp files
     for (auto& entry :
         std::filesystem::directory_iterator(
             std::filesystem::temp_directory_path()))
     {
-        auto name = entry.path().filename().wstring();
+        auto name =
+            entry.path()
+            .filename()
+            .wstring();
 
-        if (name.starts_with(L"plugin_hotreload_"))
+        if (name.starts_with(
+            L"plugin_hotreload_"))
         {
             std::error_code ec;
 
-            std::filesystem::remove(entry.path(), ec);
+            std::filesystem::remove(
+                entry.path(),
+                ec);
 
-            auto tempPdb = GetPdbPath(entry.path());
+            auto tempPdb =
+                GetPdbPath(entry.path());
 
-            std::filesystem::remove(tempPdb, ec);
+            std::filesystem::remove(
+                tempPdb,
+                ec);
         }
     }
 
@@ -392,6 +585,7 @@ int main()
     run_func run = nullptr;
 
     classInfo_func getMyStructTypeInfo = nullptr;
+    unsigned int latestSizeOfMyStruct = -1;
 
     std::filesystem::path libFilePath =
         L"Plugin\\x64\\Debug\\Plugin.dll";
@@ -399,70 +593,77 @@ int main()
     std::filesystem::path pdbPath =
         L"Plugin\\x64\\Debug\\Plugin.pdb";
 
+    // Initial startup DLL copy/load
+    g_readyDllPath = GenerateTempDllPath();
+
+    std::filesystem::copy_file(
+        libFilePath,
+        g_readyDllPath,
+        std::filesystem::copy_options::overwrite_existing);
+
+    g_readyPdbPath =
+        GetPdbPath(g_readyDllPath);
+
+    std::filesystem::copy_file(
+        pdbPath,
+        g_readyPdbPath,
+        std::filesystem::copy_options::overwrite_existing);
+
+    g_buildState =
+        BuildState::ReadyToLoad;
+
+    // Worker and file watcher threads
+    std::thread buildThread(
+        BuildWorkerThread,
+        libFilePath,
+        pdbPath);
+
+    buildThread.detach();
+
     WatchContext pluginSourceWatchContext;
     WatchContext mirrorSourceWatchContext;
-    WatchContext outputWatchContext;
 
-    setupFileWatcher(pluginSourceWatchContext, L"Plugin", WatchType::Source, false);
-    setupFileWatcher(mirrorSourceWatchContext, L"Mirror", WatchType::Source, false);
+    setupFileWatcher(
+        pluginSourceWatchContext,
+        L"Plugin",
+        WatchType::Source,
+        false);
 
-    if (!setupFileWatcher(
-        outputWatchContext,
-        L"Plugin\\x64\\Debug",
-        WatchType::Output))
-    {
-        return 1;
-    }
-
-    std::atomic<bool> reloadInProgress = false;
+    setupFileWatcher(
+        mirrorSourceWatchContext,
+        L"Mirror",
+        WatchType::Source,
+        false);
 
     std::cout
-        << "[INFO] Monitoring source + plugin changes..."
+        << "[INFO] Monitoring source changes..."
         << std::endl;
 
     while (true)
     {
-        // Let APC callbacks execute
-        SleepEx(100, TRUE);
+        SleepEx(10, TRUE);
 
         //
-        // BUILD PHASE
+        // BUILD REQUEST PHASE
         //
 
-        if (sourceChanged && !buildInProgress)
+        if (sourceChanged)
         {
-            auto now = std::chrono::steady_clock::now();
+            auto now =
+                std::chrono::steady_clock::now();
 
-            // debounce filesystem spam
             if (now - lastSourceChangeTime >
                 std::chrono::milliseconds(100))
             {
                 sourceChanged = false;
 
-                buildInProgress = true;
-
-                std::cout
-                    << "[INFO] Rebuilding plugin..."
-                    << std::endl;
-
-                bool buildSuccess = BuildPlugin();
-
-                buildInProgress = false;
-
-                if (!buildSuccess)
+                if (g_buildState ==
+                    BuildState::Idle ||
+                    g_buildState ==
+                    BuildState::Failed)
                 {
-                    std::cerr
-                        << "[ERROR] Plugin build failed."
-                        << std::endl;
-                }
-                else
-                {
-                    std::cout
-                        << "[INFO] Plugin build succeeded."
-                        << std::endl;
-
-                    // force reload even if watcher misses event
-                    pluginChanged = true;
+                    g_buildState =
+                        BuildState::Pending;
                 }
             }
         }
@@ -470,13 +671,10 @@ int main()
         //
         // RELOAD PHASE
         //
-
-        if ((pluginChanged || !hLib) &&
+        if (g_buildState == BuildState::ReadyToLoad &&
             !reloadInProgress)
         {
             reloadInProgress = true;
-
-            pluginChanged = false;
 
             bool reloadSucceeded = false;
 
@@ -493,13 +691,16 @@ int main()
                         << std::endl;
 
                     run = nullptr;
-                    getMyStructTypeInfo = nullptr;
+
+                    getMyStructTypeInfo =
+                        nullptr;
 
                     FreeLibrary(hLib);
 
                     hLib = nullptr;
 
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(10));
 
                     if (!currentLoadedDllPath.empty())
                     {
@@ -510,7 +711,8 @@ int main()
                             ec);
 
                         auto tempPdb =
-                            GetPdbPath(currentLoadedDllPath);
+                            GetPdbPath(
+                                currentLoadedDllPath);
 
                         std::filesystem::remove(
                             tempPdb,
@@ -519,81 +721,35 @@ int main()
                 }
 
                 //
-                // wait for linker output
+                // grab worker-produced dll
                 //
 
-                if (!WaitForFileReady(libFilePath))
+                std::filesystem::path readyDll;
+
                 {
-                    std::cerr
-                        << "[ERROR] Timed out waiting for DLL."
-                        << std::endl;
+                    std::scoped_lock lock(
+                        g_readyDllMutex);
 
-                    break;
-                }
-
-                if (!WaitForFileStable(pdbPath))
-                {
-                    std::cerr
-                        << "[ERROR] Timed out waiting for PDB."
-                        << std::endl;
-
-                    break;
-                }
-
-                //
-                // copy dll
-                //
-
-                currentLoadedDllPath =
-                    GenerateTempDllPath();
-
-                try
-                {
-                    std::filesystem::copy_file(
-                        libFilePath,
-                        currentLoadedDllPath,
-                        std::filesystem::copy_options::overwrite_existing);
-                }
-                catch (const std::exception& e)
-                {
-                    std::cerr
-                        << "[ERROR] Failed to copy DLL: "
-                        << e.what()
-                        << std::endl;
-
-                    break;
-                }
-
-                //
-                // copy pdb
-                //
-
-                auto tempPdb =
-                    GetPdbPath(currentLoadedDllPath);
-
-                std::error_code ec;
-
-                if (!std::filesystem::copy_file(
-                    pdbPath,
-                    tempPdb,
-                    std::filesystem::copy_options::overwrite_existing,
-                    ec))
-                {
-                    std::cerr
-                        << "[ERROR] Failed to copy PDB: "
-                        << ec.message()
-                        << std::endl;
-
-                    break;
+                    readyDll =
+                        g_readyDllPath;
                 }
 
                 //
                 // load dll
                 //
 
+                if (readyDll.empty())
+                {
+                    std::cerr
+                        << "[ERROR] No DLL ready to load."
+                        << std::endl;
+
+                    break;
+                }
+
                 hLib =
                     LoadLibraryW(
-                        currentLoadedDllPath.c_str());
+                        readyDll.c_str());
 
                 if (!hLib)
                 {
@@ -604,6 +760,9 @@ int main()
 
                     break;
                 }
+
+                currentLoadedDllPath =
+                    readyDll;
 
                 //
                 // load exports
@@ -654,6 +813,9 @@ int main()
 
             if (reloadSucceeded)
             {
+                g_buildState =
+                    BuildState::Idle;
+
                 std::cout
                     << "[INFO] Plugin reload succeeded."
                     << std::endl;
@@ -670,20 +832,27 @@ int main()
 
             if (getMyStructTypeInfo)
             {
-                std::cout
-                    << "[INFO] Size of MyStruct is "
-                    << getMyStructTypeInfo()->size
-                    << " bytes"
-                    << std::endl;
+                if (latestSizeOfMyStruct != getMyStructTypeInfo()->size)
+                {
+                    latestSizeOfMyStruct = getMyStructTypeInfo()->size;
+                    std::cout
+                        << "[INFO] Last size of MyStruct was "
+                        << latestSizeOfMyStruct
+                        << " bytes"
+                        << std::endl;
+                }
             }
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(10));
     }
 
-    CloseHandle(pluginSourceWatchContext.dirHandle);
-    CloseHandle(mirrorSourceWatchContext.dirHandle);
-    CloseHandle(outputWatchContext.dirHandle);
+    CloseHandle(
+        pluginSourceWatchContext.dirHandle);
+
+    CloseHandle(
+        mirrorSourceWatchContext.dirHandle);
 
     return 0;
 }
