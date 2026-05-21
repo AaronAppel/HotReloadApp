@@ -11,7 +11,6 @@ struct MyStruct
     int value3 = 0;
 };
 
-
 MIR_TYPE_ID(0, MyStruct)
 
 MIR_CLASS(MyStruct)

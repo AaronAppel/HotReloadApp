@@ -1,9 +1,8 @@
 #include <filesystem>
 #include <string>
 
-// const std::string libFileAbsolutePath = "B:\\HotReloadApp\\x64\\Debug\\Plugin.dll";
-
 #include <windows.h>
+
 std::wstring LibFileRelativeDirectory()
 {
     if (IsDebuggerPresent())
@@ -13,10 +12,74 @@ std::wstring LibFileRelativeDirectory()
     return L".";
 }
 
+std::wstring PluginOutputDirectory()
+{
+    return L"Plugin\\x64\\Debug";
+}
+
 #include <iostream>
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <winnt.h>
+
+bool BuildPlugin()
+{
+    std::wstring command =
+        L"\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe\" "
+        L"Plugin\\Plugin.vcxproj "
+        L"/p:Configuration=Debug "
+        L"/p:Platform=x64";
+
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+
+    PROCESS_INFORMATION pi = {};
+
+    std::vector<wchar_t> cmd(
+        command.begin(),
+        command.end());
+
+    cmd.push_back(L'\0');
+
+    BOOL success = CreateProcessW(
+        nullptr,
+        cmd.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        CREATE_NO_WINDOW,
+        nullptr,
+        nullptr,
+        &si,
+        &pi);
+
+    if (!success)
+    {
+        std::cerr
+            << "[ERROR] Failed to launch MSBuild: "
+            << GetLastError()
+            << std::endl;
+
+        return false;
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    return exitCode == 0;
+}
+
+std::atomic<bool> sourceChanged = false;
+std::atomic<bool> pluginChanged = false;
+std::atomic<bool> buildInProgress = false;
+std::atomic<bool> reloadInProgress = false;
+std::chrono::steady_clock::time_point lastSourceChangeTime;
 
 const std::wstring libFileName = L"Plugin.dll";
 const std::wstring cppFileName = L"Plugin.cpp";
@@ -38,8 +101,7 @@ std::filesystem::path GenerateTempDllPath()
     return tempDir / filename;
 }
 
-std::filesystem::path GetPdbPath(
-    const std::filesystem::path& dllPath)
+std::filesystem::path GetPdbPath(const std::filesystem::path& dllPath)
 {
     auto pdb = dllPath;
     pdb.replace_extension(L".pdb");
@@ -55,10 +117,16 @@ bool WaitForFileReady(
 
     while (true)
     {
+        // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew
+#define    FILE_SHARE_NONE 0
+        // 0                    = 0 (Exclusive lock)
+        // FILE_SHARE_READ      = 1 (Allow read)
+        // FILE_SHARE_WRITE     = 2 (Allow write)
+        // FILE_SHARE_DELETE    = 4 (Allow deletion)
         HANDLE file = CreateFileW(
             path.c_str(),
             GENERIC_READ,
-            0,                  // NO sharing
+            FILE_SHARE_NONE,
             nullptr,
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
@@ -146,31 +214,93 @@ using run_func = void(*)();
 #include "Plugin/Plugin.h"
 using classInfo_func = Mirror::TypeInfo*(*)();
 
-std::atomic<bool> pluginChanged = false;
+enum class WatchType
+{
+    Source,
+    Output
+};
 
 struct WatchContext {
     OVERLAPPED overlapped = {};
     char buffer[1024];
     HANDLE dirHandle = INVALID_HANDLE_VALUE;
-    wchar_t targetFile[260];
+    WatchType type;
 };
+
+bool HasExtension(
+    const std::wstring& filename,
+    const std::wstring& ext)
+{
+    if (filename.length() < ext.length())
+        return false;
+
+    return filename.ends_with(ext);
+}
 
 // Completion routine called by the OS when a directory change occurs
 void CALLBACK DirectoryChangeCallback(DWORD errorCode, DWORD bytesTransferred, LPOVERLAPPED lpOverlapped) {
-    if (errorCode != ERROR_SUCCESS || bytesTransferred == 0)
-        return;
 
-    auto* context = reinterpret_cast<WatchContext*>(lpOverlapped);
+    auto* context =
+        CONTAINING_RECORD(
+            lpOverlapped,
+            WatchContext,
+            overlapped);
+    BYTE* base = reinterpret_cast<BYTE*>(context->buffer);
 
-    FILE_NOTIFY_INFORMATION* fni = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(context->buffer);
-    std::wstring changedFile(fni->FileName, fni->FileNameLength / sizeof(WCHAR));
-
-    if (changedFile == libFileName) {
-        pluginChanged = true;
-    }
-    else if (changedFile == cppFileName)
+    if (errorCode != ERROR_SUCCESS)
     {
-        // #TODO Add/change a watch to the plugin's .cpp file and reload DLL via code change instead of manual recompile
+        std::cerr
+            << "[ERROR] Directory watch failed: "
+            << errorCode
+            << std::endl;
+    }
+    else if (bytesTransferred > 0)
+    {
+        // Process notifications
+
+        while (true)
+        {
+            FILE_NOTIFY_INFORMATION* fni =
+                reinterpret_cast<FILE_NOTIFY_INFORMATION*>(base);
+
+            std::wstring changedFile(
+                fni->FileName,
+                fni->FileNameLength / sizeof(WCHAR));
+
+            std::wcout
+                << L"[INFO] Action "
+                << fni->Action
+                << L": "
+                << changedFile
+                << std::endl;
+
+            if (context->type == WatchType::Output)
+            {
+                if (HasExtension(changedFile, L".dll"))
+                {
+                    pluginChanged = true;
+                }
+            }
+            else if (context->type == WatchType::Source)
+            {
+                if (true ||
+                    HasExtension(changedFile, L".h") ||
+                    HasExtension(changedFile, L".cpp"))
+                {
+                    sourceChanged = true;
+
+                    lastSourceChangeTime =
+                        std::chrono::steady_clock::now();
+                }
+            }
+
+            if (fni->NextEntryOffset == 0)
+            {
+                break;
+            }
+
+            base += fni->NextEntryOffset;
+        }
     }
 
     // Re-issue the directory watch
@@ -179,7 +309,7 @@ void CALLBACK DirectoryChangeCallback(DWORD errorCode, DWORD bytesTransferred, L
         context->dirHandle,
         context->buffer,
         sizeof(context->buffer),
-        FALSE,
+        TRUE, // Watch subdirs
         FILE_NOTIFY_CHANGE_FILE_NAME |
         FILE_NOTIFY_CHANGE_LAST_WRITE,
         nullptr,
@@ -193,9 +323,11 @@ void CALLBACK DirectoryChangeCallback(DWORD errorCode, DWORD bytesTransferred, L
     }
 }
 
-bool setupFileWatcher(WatchContext& context) {
+bool setupFileWatcher(WatchContext& context, const std::wstring& directory, WatchType type, bool watchSubDirs = true)
+{
+    context.type = type;
     context.dirHandle = CreateFileW(
-        LibFileRelativeDirectory().c_str(),
+        directory.c_str(),
         FILE_LIST_DIRECTORY,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr,
@@ -210,13 +342,13 @@ bool setupFileWatcher(WatchContext& context) {
     }
 
     ZeroMemory(&context.overlapped, sizeof(OVERLAPPED));
-    wcscpy_s(context.targetFile, libFileName.c_str());
 
     BOOL success = ReadDirectoryChangesW(
         context.dirHandle,
         context.buffer,
         sizeof(context.buffer),
-        FALSE, // don't watch subdirs
+        (int)watchSubDirs,
+        FILE_NOTIFY_CHANGE_FILE_NAME |
         FILE_NOTIFY_CHANGE_LAST_WRITE,
         nullptr,
         &context.overlapped,
@@ -232,7 +364,9 @@ bool setupFileWatcher(WatchContext& context) {
     return true;
 }
 
-int main() {
+int main()
+{
+    // #TODO Multi-thread to do work on separate thread and the main thread can just reload the already build DLL
 
     // Clean up previous temp files
     for (auto& entry :
@@ -244,145 +378,312 @@ int main() {
         if (name.starts_with(L"plugin_hotreload_"))
         {
             std::error_code ec;
+
             std::filesystem::remove(entry.path(), ec);
 
-            auto tempPdb = GetPdbPath(currentLoadedDllPath);
+            auto tempPdb = GetPdbPath(entry.path());
+
             std::filesystem::remove(tempPdb, ec);
         }
     }
 
     HMODULE hLib = nullptr;
+
     run_func run = nullptr;
+
     classInfo_func getMyStructTypeInfo = nullptr;
 
-    std::filesystem::path libFilePath = LibFileRelativeDirectory();
-    libFilePath /= libFileName;
-    std::filesystem::path pdbPath = libFilePath.parent_path() / L"Plugin.pdb";
+    std::filesystem::path libFilePath =
+        L"Plugin\\x64\\Debug\\Plugin.dll";
 
-    WatchContext watchContext;
-    if (!setupFileWatcher(watchContext)) {
+    std::filesystem::path pdbPath =
+        L"Plugin\\x64\\Debug\\Plugin.pdb";
+
+    WatchContext pluginSourceWatchContext;
+    WatchContext mirrorSourceWatchContext;
+    WatchContext outputWatchContext;
+
+    setupFileWatcher(pluginSourceWatchContext, L"Plugin", WatchType::Source, false);
+    setupFileWatcher(mirrorSourceWatchContext, L"Mirror", WatchType::Source, false);
+
+    if (!setupFileWatcher(
+        outputWatchContext,
+        L"Plugin\\x64\\Debug",
+        WatchType::Output))
+    {
         return 1;
     }
 
-    std::cout << "[INFO] Monitoring for changes to plugin.dll..." << std::endl;
+    std::atomic<bool> reloadInProgress = false;
 
-    while (true) {
-        // Allow the OS to execute completion routines (APC) via alertable sleep
-        SleepEx(1000, TRUE); // #TODO Avoid SleepEx by overlapping ReadDirectoryChangesW calls so OS threads work instead
+    std::cout
+        << "[INFO] Monitoring source + plugin changes..."
+        << std::endl;
 
-        if (pluginChanged || !hLib) {
-            pluginChanged = false;
+    while (true)
+    {
+        // Let APC callbacks execute
+        SleepEx(100, TRUE);
 
-            if (hLib)
+        //
+        // BUILD PHASE
+        //
+
+        if (sourceChanged && !buildInProgress)
+        {
+            auto now = std::chrono::steady_clock::now();
+
+            // debounce filesystem spam
+            if (now - lastSourceChangeTime >
+                std::chrono::milliseconds(100))
             {
-                std::cout << "[INFO] Reloading plugin..." << std::endl;
+                sourceChanged = false;
 
-                run = nullptr;
-                getMyStructTypeInfo = nullptr;
+                buildInProgress = true;
 
-                FreeLibrary(hLib);
-                hLib = nullptr;
+                std::cout
+                    << "[INFO] Rebuilding plugin..."
+                    << std::endl;
 
-                // Give Windows a moment to fully release file handles
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                bool buildSuccess = BuildPlugin();
 
-                // Delete previous temp DLL
-                if (!currentLoadedDllPath.empty())
+                buildInProgress = false;
+
+                if (!buildSuccess)
                 {
-                    std::error_code ec;
-                    std::filesystem::remove(currentLoadedDllPath, ec);
+                    std::cerr
+                        << "[ERROR] Plugin build failed."
+                        << std::endl;
+                }
+                else
+                {
+                    std::cout
+                        << "[INFO] Plugin build succeeded."
+                        << std::endl;
+
+                    // force reload even if watcher misses event
+                    pluginChanged = true;
                 }
             }
+        }
 
-            // Wait until file is ready (some editors take time to write) by checking how many locks the .dll and .pdb files have
-            if (!WaitForFileReady(libFilePath))
+        //
+        // RELOAD PHASE
+        //
+
+        if ((pluginChanged || !hLib) &&
+            !reloadInProgress)
+        {
+            reloadInProgress = true;
+
+            pluginChanged = false;
+
+            bool reloadSucceeded = false;
+
+            do
             {
-                std::cerr
-                    << "[ERROR] Timed out waiting for DLL rebuild."
+                //
+                // unload old dll
+                //
+
+                if (hLib)
+                {
+                    std::cout
+                        << "[INFO] Reloading plugin..."
+                        << std::endl;
+
+                    run = nullptr;
+                    getMyStructTypeInfo = nullptr;
+
+                    FreeLibrary(hLib);
+
+                    hLib = nullptr;
+
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+                    if (!currentLoadedDllPath.empty())
+                    {
+                        std::error_code ec;
+
+                        std::filesystem::remove(
+                            currentLoadedDllPath,
+                            ec);
+
+                        auto tempPdb =
+                            GetPdbPath(currentLoadedDllPath);
+
+                        std::filesystem::remove(
+                            tempPdb,
+                            ec);
+                    }
+                }
+
+                //
+                // wait for linker output
+                //
+
+                if (!WaitForFileReady(libFilePath))
+                {
+                    std::cerr
+                        << "[ERROR] Timed out waiting for DLL."
+                        << std::endl;
+
+                    break;
+                }
+
+                if (!WaitForFileStable(pdbPath))
+                {
+                    std::cerr
+                        << "[ERROR] Timed out waiting for PDB."
+                        << std::endl;
+
+                    break;
+                }
+
+                //
+                // copy dll
+                //
+
+                currentLoadedDllPath =
+                    GenerateTempDllPath();
+
+                try
+                {
+                    std::filesystem::copy_file(
+                        libFilePath,
+                        currentLoadedDllPath,
+                        std::filesystem::copy_options::overwrite_existing);
+                }
+                catch (const std::exception& e)
+                {
+                    std::cerr
+                        << "[ERROR] Failed to copy DLL: "
+                        << e.what()
+                        << std::endl;
+
+                    break;
+                }
+
+                //
+                // copy pdb
+                //
+
+                auto tempPdb =
+                    GetPdbPath(currentLoadedDllPath);
+
+                std::error_code ec;
+
+                if (!std::filesystem::copy_file(
+                    pdbPath,
+                    tempPdb,
+                    std::filesystem::copy_options::overwrite_existing,
+                    ec))
+                {
+                    std::cerr
+                        << "[ERROR] Failed to copy PDB: "
+                        << ec.message()
+                        << std::endl;
+
+                    break;
+                }
+
+                //
+                // load dll
+                //
+
+                hLib =
+                    LoadLibraryW(
+                        currentLoadedDllPath.c_str());
+
+                if (!hLib)
+                {
+                    std::cerr
+                        << "[ERROR] Failed to load DLL: "
+                        << GetLastError()
+                        << std::endl;
+
+                    break;
+                }
+
+                //
+                // load exports
+                //
+
+                run =
+                    (run_func)GetProcAddress(
+                        hLib,
+                        "run");
+
+                if (!run)
+                {
+                    std::cerr
+                        << "[ERROR] Missing export: run"
+                        << std::endl;
+
+                    FreeLibrary(hLib);
+
+                    hLib = nullptr;
+
+                    break;
+                }
+
+                getMyStructTypeInfo =
+                    (classInfo_func)GetProcAddress(
+                        hLib,
+                        "myStructTypeInfo");
+
+                if (!getMyStructTypeInfo)
+                {
+                    std::cerr
+                        << "[ERROR] Missing export: "
+                        << "myStructTypeInfo"
+                        << std::endl;
+
+                    FreeLibrary(hLib);
+
+                    hLib = nullptr;
+
+                    break;
+                }
+
+                reloadSucceeded = true;
+
+            } while (false);
+
+            reloadInProgress = false;
+
+            if (reloadSucceeded)
+            {
+                std::cout
+                    << "[INFO] Plugin reload succeeded."
                     << std::endl;
-
-                continue;
-            }
-
-            if (!WaitForFileStable(pdbPath))
-            {
-                std::cerr
-                    << "[ERROR] Timed out waiting for PDB."
-                    << std::endl;
-
-                continue;
-            }
-
-            // Copy new .dll and .pdb files
-            currentLoadedDllPath = GenerateTempDllPath();
-
-            try
-            {
-                std::filesystem::copy_file(
-                    libFilePath,
-                    currentLoadedDllPath,
-                    std::filesystem::copy_options::overwrite_existing);
-            }
-            catch (const std::exception& e)
-            {
-                std::cerr
-                    << "[ERROR] Failed to copy DLL: "
-                    << e.what()
-                    << std::endl;
-
-                continue;
-            }
-
-            std::filesystem::path originalPdb =
-                libFilePath.parent_path() / L"Plugin.pdb";
-
-            std::filesystem::path tempPdb =
-                GetPdbPath(currentLoadedDllPath);
-
-            std::error_code ec;
-            if (!std::filesystem::copy_file(
-                originalPdb,
-                tempPdb,
-                std::filesystem::copy_options::overwrite_existing,
-                ec))
-            {
-                std::cerr
-                    << "[ERROR] Failed to copy PDB: "
-                    << ec.message()
-                    << std::endl;
-
-                continue;
-            }
-
-            hLib = LoadLibraryW(currentLoadedDllPath.c_str());
-            if (!hLib) {
-                std::cerr << "Failed to load plugin DLL: " << GetLastError() << std::endl;
-                continue;
-            }
-
-            run = (run_func)GetProcAddress(hLib, "run");
-            if (!run) {
-                std::cerr << "Failed to find symbol 'run'" << std::endl;
-                continue;
-            }
-            getMyStructTypeInfo = (classInfo_func)GetProcAddress(hLib, "myStructTypeInfo");
-            if (!getMyStructTypeInfo) {
-                std::cerr << "Failed to find symbol 'myStructTypeInfo'" << std::endl;
-                continue;
             }
         }
 
-        if (run) {
+        //
+        // RUN PHASE
+        //
+
+        if (run)
+        {
             run();
+
             if (getMyStructTypeInfo)
             {
-                std::cout << "[INFO] Size of MyStruct is " << getMyStructTypeInfo()->size << " bytes" << std::endl;
+                std::cout
+                    << "[INFO] Size of MyStruct is "
+                    << getMyStructTypeInfo()->size
+                    << " bytes"
+                    << std::endl;
             }
         }
 
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    CloseHandle(watchContext.dirHandle);
+    CloseHandle(pluginSourceWatchContext.dirHandle);
+    CloseHandle(mirrorSourceWatchContext.dirHandle);
+    CloseHandle(outputWatchContext.dirHandle);
+
     return 0;
 }
