@@ -70,6 +70,9 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <LinkIncremental>true</LinkIncremental>
+  </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -127,6 +130,9 @@
     <ClCompile Include="HotReloadApp.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="Mirror\Mirror.vcxproj">
+      <Project>{fcf87702-6518-49fc-a0e1-fbe419d8c4ab}</Project>
+    </ProjectReference>
     <ProjectReference Include="Plugin\Plugin.vcxproj">
       <Project>{568537a0-7728-4202-a998-9d41e8318447}</Project>
     </ProjectReference>

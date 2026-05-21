@@ -4,7 +4,7 @@ B:\HotReloadApp\x64\Debug
 and Plugin files into:
 B:\HotReloadApp\Plugin\x64\Debug
 so a copy is required to get the newest Plugin.dll file over to where the HotReloadApp.exe expects
-Plugin.dll to be. Perhaps the file watch thread to look for a new Plugin.dll in the Plugin\x64\Debug folder
+Plugin.dll to be. Perhaps the file watch thread could look for a new Plugin.dll in the Plugin\x64\Debug folder
 and trigger a file copy in C++ code, instead of using .bat files. Eventually...
 
 // -- Locked .pdb file --
@@ -13,8 +13,21 @@ The file:
 Can get locked by Visual Studio, or MSBuild, or something,
 when the BuildPluginDll.bat executes the 1st time, IF also debugging through Visual Studio.
 This means future compilations will fail as the file is not modifiable.
-The build output will suggest that there is not enough disk space but stopping visual studio.
+The build output will suggest that there is not enough disk space and stop the visual studio build.
 
 Running the HotReloadApp.exe stand alone, without attached debugging allow for
 calling BuildPluginDll.bat repeatedly, resulting in continous recompiling and automatic dll reloading.
 *May only be an issue when multi threaded, using a background thread or OS callback to asynchronously poll OS for directory changes*
+Also ensure ensure another thread is not executing code in a .dll that is being unloaded. Must join/stop all threads using that library.
+
+Optional Plugin project property changes:
+"Multi-processor Compiltaion" option to "Yes (/MP)" and add command line option "/FS"
+Program Database /Zi instead of /ZI to avoid formatting .pdb for edit-and-continue support since it won't be relevant when the new .pdb and .dll are loaded
+Linker -> General -> Enable Deterministic Builds set to "No" Sometimes helps avoid stale debug state during rapid rebuilds
+Can also set Linker -> General -> Enable Incremental Linking to (/INCREMENTAL:NO) to avoid mutating the .pdb and generated .ilk (potentially problematic) files
+If using /INCREMENTAL:NO, must use /Zi
+
+Permanent fix is to generate unique names for the .pdb and .dll file to avoid app and operating system file locking issues.
+
+Additional command line options
+/PDBALTPATH:%_PDB%
