@@ -8,6 +8,13 @@
 
 extern "C" EXPORT void run();
 
+// extern "C" EXPORT void OnFirstLoaded();
+// extern "C" EXPORT void OnPreUnload();
+// extern "C" EXPORT void OnReloaded();
+
+extern "C" EXPORT void runAlternate();
+extern "C" EXPORT void runAlternate2();
+
 // #TODO How to forward declare?
 // struct Mirror
 // {
@@ -15,4 +22,21 @@ extern "C" EXPORT void run();
 // };
 
 #include "../Mirror/MIR_Mirror.h"
-extern "C" EXPORT const Mirror::TypeInfo* MyStructTypeInfo();
+#include <vector>
+extern "C" EXPORT std::vector<const Mirror::TypeInfo*> StructTypeInfos();
+
+struct MyStructAlternate
+{
+    char value = 0;
+    int value2 = 0;
+    float value4[7] = { 0 };
+};
+
+struct MyStruct
+{
+    char value = 0;
+    int value2 = 0;
+    bool value3 = 0;
+    float value4[7] = { 0 };
+};
+

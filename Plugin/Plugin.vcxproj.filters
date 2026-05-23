@@ -2,8 +2,12 @@
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <ClCompile Include="Plugin.cpp" />
+    <ClCompile Include="PluginAlternate.cpp" />
+    <ClCompile Include="ForMirror.cpp" />
+    <ClCompile Include="PluginAlternate2.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Plugin.h" />
+    <ClInclude Include="ForMirror.h" />
   </ItemGroup>
 </Project>

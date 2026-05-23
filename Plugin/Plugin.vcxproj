@@ -19,9 +19,13 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="ForMirror.cpp" />
     <ClCompile Include="Plugin.cpp" />
+    <ClCompile Include="PluginAlternate.cpp" />
+    <ClCompile Include="PluginAlternate2.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="ForMirror.h" />
     <ClInclude Include="Plugin.h" />
   </ItemGroup>
   <ItemGroup>
@@ -133,6 +137,8 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
       <AdditionalOptions>/PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalDependencies>HotReloadApp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>B:\HotReloadApp\x64\Debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">

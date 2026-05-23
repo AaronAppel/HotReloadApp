@@ -1,30 +1,44 @@
 // #include <iostream>
 
-#include "plugin.h"
+#include "Plugin.h"
 
-#include "../Mirror/MIR_Mirror.h"
-
-struct MyStruct
-{
-    char value = 0;
-    int value2 = 0;
-};
-
-MIR_TYPE_ID(0, MyStruct)
+#include "ForMirror.h"
 
 MIR_CLASS(MyStruct)
-// MIR_CLASS_MEMBER_FLAGS(value, 0)
-MIR_CLASS_MEMBER(value)
-MIR_CLASS_MEMBER(value2)
+MIR_CLASS_MEMBER_FLAGS(value, 0)
+MIR_CLASS_MEMBER_FLAGS(value2, 0)
+MIR_CLASS_MEMBER_FLAGS(value3, 0)
+MIR_CLASS_MEMBER_FLAGS(value4, 0)
 MIR_CLASS_END
 
-int global = 0;
-void run() {
-    // std::cout << "Running plugin version 1!" << std::endl;
-    global++;
+std::vector<const Mirror::TypeInfo*> StructTypeInfos()
+{
+    return {
+        Mir::InfoForType<MyStruct>(),
+        Mir::InfoForType<MyStructAlternate>()
+    };
 }
 
-const Mirror::TypeInfo* MyStructTypeInfo()
+#include "../HotReloadApp.h"
+
+void Startup() { }
+void Shutdown() { }
+
+extern "C" EXPORT void run()
 {
-    return Mir::InfoForType<MyStruct>();
+    if (EntityCount() == 0)
+    {
+        AddEntity();
+        AddEntity();
+    }
+
+    for (int i = 0; i < EntityCount(); i++)
+    {
+        Entity* entity = GetEntity(i);
+
+        // entity->health--;
+
+        entity->health -= 10;
+        entity->speed += 0.25f;
+    }
 }

@@ -3,4 +3,7 @@
   <ItemGroup>
     <ClCompile Include="HotReloadApp.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="HotReloadApp.h" />
+  </ItemGroup>
 </Project>

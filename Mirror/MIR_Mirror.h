@@ -57,7 +57,6 @@ static const Mirror::TypeInfo* Mirror::InfoForType<TYPE_WRAP(TYPE)>() {									
 
 // #NOTE Using __VA_ARGS__ to handle macro calls with comma(s) ',' like MIR_INFO_FOR_TYPE(std::map<int, bool>)
 // #NOTE Below switch fallthrough compiler warning 26819 cannot be handled within this macro
-#define MIR_TYPE_VOID
 #define MIR_TYPE(...) MIR_TYPE_IMPL((__VA_ARGS__))
 #define MIR_TYPE_IMPL(TYPE)																													\
 MIR_TYPE_COMMON(TYPE)																														\

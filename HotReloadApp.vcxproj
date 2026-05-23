@@ -103,7 +103,7 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_CONSOLE;HOTRELOADAPP_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
     </ClCompile>
@@ -133,9 +133,9 @@
     <ProjectReference Include="Mirror\Mirror.vcxproj">
       <Project>{fcf87702-6518-49fc-a0e1-fbe419d8c4ab}</Project>
     </ProjectReference>
-    <ProjectReference Include="Plugin\Plugin.vcxproj">
-      <Project>{568537a0-7728-4202-a998-9d41e8318447}</Project>
-    </ProjectReference>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="HotReloadApp.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

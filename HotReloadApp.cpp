@@ -23,7 +23,6 @@
 #include <mutex>
 
 #include "Mirror/MIR_Mirror.h"
-#include "Plugin/Plugin.h"
 
 std::wstring LibFileRelativeDirectory()
 {
@@ -46,7 +45,8 @@ bool BuildPlugin()
         L"\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe\" "
         L"Plugin\\Plugin.vcxproj "
         L"/p:Configuration=Debug "
-        L"/p:Platform=x64";
+        L"/p:Platform=x64 "
+        L"/verbosity:minimal";
 
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
@@ -66,7 +66,7 @@ bool BuildPlugin()
             nullptr,
             nullptr,
             FALSE,
-            CREATE_NO_WINDOW,
+            0, // IMPORTANT: remove CREATE_NO_WINDOW
             nullptr,
             nullptr,
             &si,
@@ -94,6 +94,11 @@ bool BuildPlugin()
 
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
+
+    std::cout
+        << "[INFO] MSBuild exited with code "
+        << exitCode
+        << std::endl;
 
     return exitCode == 0;
 }
@@ -252,17 +257,19 @@ bool WaitForFileStable(
     }
 }
 
-bool IsSourceFile(
-    const std::filesystem::path& path)
+bool IsSourceFile(const std::filesystem::path& path)
 {
-    auto ext =
-        path.extension().wstring();
+    std::wstring ext = path.extension().wstring();
 
     return
-        ext == L".cpp" ||
-        ext == L".h" ||
-        ext == L".hpp" ||
-        ext == L".c";
+        !ext.ends_with(L"~") &&
+        !ext.ends_with(L".TMP") &&
+        (
+            ext == L".cpp" ||
+            ext == L".h" ||
+            ext == L".hpp" ||
+            ext == L".c"
+        );
 }
 
 std::filesystem::file_time_type
@@ -272,8 +279,7 @@ GetNewestSourceTimestamp(
     std::filesystem::file_time_type newest =
         std::filesystem::file_time_type::min();
 
-    for (const auto& entry :
-        std::filesystem::recursive_directory_iterator(directory))
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(directory))
     {
         if (!entry.is_regular_file())
         {
@@ -285,9 +291,7 @@ GetNewestSourceTimestamp(
             continue;
         }
 
-        auto writeTime =
-            std::filesystem::last_write_time(
-                entry.path());
+        auto writeTime = std::filesystem::last_write_time(entry.path());
 
         if (writeTime > newest)
         {
@@ -325,12 +329,6 @@ bool IsPluginBuildOutdated(
 
     return newestSource > dllWriteTime;
 }
-
-using run_func =
-void(*)();
-
-using classInfo_func =
-const Mirror::TypeInfo* (*)();
 
 enum class WatchType
 {
@@ -395,10 +393,14 @@ void CALLBACK DirectoryChangeCallback(
                 fni->FileNameLength /
                 sizeof(WCHAR));
 
-            std::wcout
-                << L"[INFO] Changed: "
-                << changedFile
-                << std::endl;
+            constexpr bool printOutAllChangedFilesOrDirs = false;
+            if (printOutAllChangedFilesOrDirs)
+            {
+                std::wcout
+                    << L"[INFO] Changed: "
+                    << changedFile
+                    << std::endl;
+            }
 
             if (HasExtension(changedFile, L".cpp") ||
                 HasExtension(changedFile, L".h"))
@@ -407,6 +409,14 @@ void CALLBACK DirectoryChangeCallback(
 
                 lastSourceChangeTime =
                     std::chrono::steady_clock::now();
+
+                if (!printOutAllChangedFilesOrDirs)
+                {
+                    std::wcout
+                        << L"[INFO] Changed: "
+                        << changedFile
+                        << std::endl;
+                }
             }
 
             if (fni->NextEntryOffset == 0)
@@ -601,8 +611,7 @@ void BuildWorkerThread(
                     << ec.message()
                     << std::endl;
 
-                g_buildState =
-                    BuildState::Failed;
+                g_buildState = BuildState::Failed;
 
                 continue;
             }
@@ -619,13 +628,35 @@ void BuildWorkerThread(
                 << "[INFO] Plugin build succeeded."
                 << std::endl;
 
-            g_buildState =
-                BuildState::ReadyToLoad;
+            g_buildState = BuildState::ReadyToLoad;
         }
 
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+}
+
+// #define HOTRELOADAPP_EXPORTS
+#include "HotReloadApp.h"
+
+std::vector<Entity> entities;
+void AddEntity()
+{
+    entities.emplace_back();
+}
+
+int EntityCount()
+{
+    return (int)entities.size();
+}
+
+Entity* GetEntity(int index)
+{
+    if (index < 0 || index >= entities.size())
+    {
+        return nullptr;
+    }
+
+    return &entities[index];
 }
 
 int main()
@@ -659,12 +690,13 @@ int main()
 
     HMODULE hLib = nullptr;
 
+    using run_func = void(*)();
     run_func run = nullptr;
 
-    classInfo_func getMyStructTypeInfo = nullptr;
+    using classInfo_func = std::vector<const Mirror::TypeInfo*>(*)();
+    classInfo_func getStructTypeInfos = nullptr;
 
-    unsigned int latestSizeOfMyStruct =
-        UINT_MAX;
+    bool hasRunSinceDllLoad = false;
 
     std::filesystem::path libFilePath =
         L"Plugin\\x64\\Debug\\Plugin.dll";
@@ -681,8 +713,7 @@ int main()
             << "[INFO] Plugin build outdated. Queueing rebuild..."
             << std::endl;
 
-        g_buildState =
-            BuildState::Pending;
+        g_buildState = BuildState::Pending;
     }
     else
     {
@@ -732,8 +763,7 @@ int main()
             return 1;
         }
 
-        g_buildState =
-            BuildState::ReadyToLoad;
+        g_buildState = BuildState::ReadyToLoad;
     }
 
     std::thread buildThread(
@@ -812,7 +842,7 @@ int main()
                         << std::endl;
 
                     run = nullptr;
-                    getMyStructTypeInfo = nullptr;
+                    getStructTypeInfos = nullptr;
 
                     FreeLibrary(hLib);
 
@@ -875,10 +905,7 @@ int main()
                 currentLoadedDllPath =
                     readyDll;
 
-                run =
-                    (run_func)GetProcAddress(
-                        hLib,
-                        "run");
+                run = (run_func)GetProcAddress(hLib, "run");
 
                 if (!run)
                 {
@@ -893,15 +920,15 @@ int main()
                     break;
                 }
 
-                getMyStructTypeInfo =
+                getStructTypeInfos =
                     (classInfo_func)GetProcAddress(
                         hLib,
-                        "MyStructTypeInfo");
+                        "StructTypeInfos");
 
-                if (!getMyStructTypeInfo)
+                if (!getStructTypeInfos)
                 {
                     std::cerr
-                        << "[ERROR] Missing export: MyStructTypeInfo"
+                        << "[ERROR] Missing export: StructTypeInfos"
                         << std::endl;
 
                     FreeLibrary(hLib);
@@ -925,6 +952,7 @@ int main()
                 std::cout
                     << "[INFO] Plugin reload succeeded."
                     << std::endl;
+                hasRunSinceDllLoad = false;
             }
         }
 
@@ -936,44 +964,66 @@ int main()
         {
             run();
 
-            if (getMyStructTypeInfo)
+            if (getStructTypeInfos && !hasRunSinceDllLoad)
             {
-                const auto* structTypeInfo =
-                    getMyStructTypeInfo();
+                hasRunSinceDllLoad = true;
 
-                if (structTypeInfo &&
-                    latestSizeOfMyStruct !=
-                    structTypeInfo->size)
+                // Print reflection info
+                std::vector<const Mir::TypeInfo*> structTypeInfos = getStructTypeInfos();
+                for (size_t i = 0; i < structTypeInfos.size(); i++)
                 {
-                    latestSizeOfMyStruct =
-                        structTypeInfo->size;
-
+                    const Mir::TypeInfo* typeInfo = structTypeInfos[i];
                     std::cout
-                        << "[INFO] MyStruct: "
-                        << latestSizeOfMyStruct
+                        << "[INFO] "
+                        << typeInfo->stringName.c_str()
+                        << ": "
+                        << typeInfo->size
                         << " bytes\n"
                         << std::endl;
 
-                    for (size_t i = 0;
-                        i < structTypeInfo->fields.size();
-                        i++)
+                    for (size_t i = 0; i < typeInfo->fields.size(); i++)
                     {
                         std::cout
-                            << structTypeInfo->fields[i].name
+                            << typeInfo->fields[i].name
                             << " "
-                            << structTypeInfo->fields[i].typeInfo->size
+                            << typeInfo->fields[i].typeInfo->size
                             << " bytes"
                             << std::endl;
                     }
 
                     std::cout << std::endl;
                 }
+
+                // Modify state
+                std::cout
+                    << "[INFO] Entity Count: "
+                    << EntityCount()
+                    << std::endl;
+
+                for (int i = 0; i < EntityCount(); i++)
+                {
+                    Entity* entity = GetEntity(i);
+
+                    std::cout
+                        << "Entity "
+                        << i
+                        << " | Health: "
+                        << entity->health
+                        << " | Speed: "
+                        << entity->speed
+                        << " | "
+                        << (entity->alive ? "\033[32mAlive\033[0m" : "\033[31mDead\033[0m")
+                        << std::endl;
+                }
+                std::cout << std::endl;
             }
         }
 
         std::this_thread::sleep_for(
             std::chrono::milliseconds(10));
     }
+
+    entities.clear();
 
     return 0;
 }
