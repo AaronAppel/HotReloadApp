@@ -1,8 +1,29 @@
+/*
+* TODO Move reusable code into new files to better organize and reuse plus platform abstraction
+*
+* FileIO.h/.cpp (watch, exists, path helpers, copy)
+* System.h/.cpp (command line, load/unload DLL helpers or at least abstract platform)
+*
+* WatchFile(file or dir path, subDirs = false, callback)
+* CommandLine("path to MSBuild", "arguments", "working dir")
+* CopyFile("existing file path", "new file path")
+*/
+
 #include <filesystem>
 #include <string>
 #include <vector>
 
+#define NOMINMAX
 #include <windows.h>
+
+#include <iostream>
+#include <atomic>
+#include <thread>
+#include <chrono>
+#include <mutex>
+
+#include "Mirror/MIR_Mirror.h"
+#include "Plugin/Plugin.h"
 
 std::wstring LibFileRelativeDirectory()
 {
@@ -18,13 +39,6 @@ std::wstring PluginOutputDirectory()
 {
     return L"Plugin\\x64\\Debug";
 }
-
-#include <iostream>
-#include <atomic>
-#include <thread>
-#include <chrono>
-#include <mutex>
-#include <winnt.h>
 
 bool BuildPlugin()
 {
@@ -45,17 +59,18 @@ bool BuildPlugin()
 
     cmd.push_back(L'\0');
 
-    BOOL success = CreateProcessW(
-        nullptr,
-        cmd.data(),
-        nullptr,
-        nullptr,
-        FALSE,
-        CREATE_NO_WINDOW,
-        nullptr,
-        nullptr,
-        &si,
-        &pi);
+    BOOL success =
+        CreateProcessW(
+            nullptr,
+            cmd.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            CREATE_NO_WINDOW,
+            nullptr,
+            nullptr,
+            &si,
+            &pi);
 
     if (!success)
     {
@@ -67,7 +82,9 @@ bool BuildPlugin()
         return false;
     }
 
-    WaitForSingleObject(pi.hProcess, INFINITE);
+    WaitForSingleObject(
+        pi.hProcess,
+        INFINITE);
 
     DWORD exitCode = 1;
 
@@ -235,18 +252,89 @@ bool WaitForFileStable(
     }
 }
 
-using run_func = void(*)();
+bool IsSourceFile(
+    const std::filesystem::path& path)
+{
+    auto ext =
+        path.extension().wstring();
 
-#include "Mirror/MIR_Mirror.h"
-#include "Plugin/Plugin.h"
+    return
+        ext == L".cpp" ||
+        ext == L".h" ||
+        ext == L".hpp" ||
+        ext == L".c";
+}
+
+std::filesystem::file_time_type
+GetNewestSourceTimestamp(
+    const std::filesystem::path& directory)
+{
+    std::filesystem::file_time_type newest =
+        std::filesystem::file_time_type::min();
+
+    for (const auto& entry :
+        std::filesystem::recursive_directory_iterator(directory))
+    {
+        if (!entry.is_regular_file())
+        {
+            continue;
+        }
+
+        if (!IsSourceFile(entry.path()))
+        {
+            continue;
+        }
+
+        auto writeTime =
+            std::filesystem::last_write_time(
+                entry.path());
+
+        if (writeTime > newest)
+        {
+            newest = writeTime;
+        }
+    }
+
+    return newest;
+}
+
+bool IsPluginBuildOutdated(
+    const std::filesystem::path& dllPath)
+{
+    if (!std::filesystem::exists(dllPath))
+    {
+        return true;
+    }
+
+    auto dllWriteTime =
+        std::filesystem::last_write_time(
+            dllPath);
+
+    auto newestPluginSource =
+        GetNewestSourceTimestamp(
+            L"Plugin");
+
+    auto newestMirrorSource =
+        GetNewestSourceTimestamp(
+            L"Mirror");
+
+    auto newestSource =
+        std::max(
+            newestPluginSource,
+            newestMirrorSource);
+
+    return newestSource > dllWriteTime;
+}
+
+using run_func =
+void(*)();
 
 using classInfo_func =
-Mirror::TypeInfo* (*)();
+const Mirror::TypeInfo* (*)();
 
 enum class WatchType
 {
-    Source,
-    Output
+    Source
 };
 
 struct WatchContext
@@ -308,23 +396,17 @@ void CALLBACK DirectoryChangeCallback(
                 sizeof(WCHAR));
 
             std::wcout
-                << L"[INFO] Action "
-                << fni->Action
-                << L": "
+                << L"[INFO] Changed: "
                 << changedFile
                 << std::endl;
 
-            if (context->type ==
-                WatchType::Source)
+            if (HasExtension(changedFile, L".cpp") ||
+                HasExtension(changedFile, L".h"))
             {
-                if (HasExtension(changedFile, L".cpp") ||
-                    HasExtension(changedFile, L".h"))
-                {
-                    sourceChanged = true;
+                sourceChanged = true;
 
-                    lastSourceChangeTime =
-                        std::chrono::steady_clock::now();
-                }
+                lastSourceChangeTime =
+                    std::chrono::steady_clock::now();
             }
 
             if (fni->NextEntryOffset == 0)
@@ -363,7 +445,7 @@ void CALLBACK DirectoryChangeCallback(
     }
 }
 
-bool setupFileWatcher(
+bool SetupFileWatcher(
     WatchContext& context,
     const std::wstring& directory,
     WatchType type,
@@ -481,28 +563,23 @@ void BuildWorkerThread(
                 continue;
             }
 
-            //
-            // Copy DLL + PDB HERE
-            //
-
             auto tempDll =
                 GenerateTempDllPath();
 
             auto tempPdb =
                 GetPdbPath(tempDll);
 
-            try
-            {
-                std::filesystem::copy_file(
-                    libFilePath,
-                    tempDll,
-                    std::filesystem::copy_options::overwrite_existing);
-            }
-            catch (const std::exception& e)
+            std::error_code ec;
+
+            if (!std::filesystem::copy_file(
+                libFilePath,
+                tempDll,
+                std::filesystem::copy_options::overwrite_existing,
+                ec))
             {
                 std::cerr
                     << "[ERROR] Failed to copy DLL: "
-                    << e.what()
+                    << ec.message()
                     << std::endl;
 
                 g_buildState =
@@ -511,7 +588,7 @@ void BuildWorkerThread(
                 continue;
             }
 
-            std::error_code ec;
+            ec.clear();
 
             if (!std::filesystem::copy_file(
                 pdbPath,
@@ -585,7 +662,9 @@ int main()
     run_func run = nullptr;
 
     classInfo_func getMyStructTypeInfo = nullptr;
-    unsigned int latestSizeOfMyStruct = -1;
+
+    unsigned int latestSizeOfMyStruct =
+        UINT_MAX;
 
     std::filesystem::path libFilePath =
         L"Plugin\\x64\\Debug\\Plugin.dll";
@@ -593,26 +672,70 @@ int main()
     std::filesystem::path pdbPath =
         L"Plugin\\x64\\Debug\\Plugin.pdb";
 
-    // Initial startup DLL copy/load
-    g_readyDllPath = GenerateTempDllPath();
+    bool needsBuild =
+        IsPluginBuildOutdated(libFilePath);
 
-    std::filesystem::copy_file(
-        libFilePath,
-        g_readyDllPath,
-        std::filesystem::copy_options::overwrite_existing);
+    if (needsBuild)
+    {
+        std::cout
+            << "[INFO] Plugin build outdated. Queueing rebuild..."
+            << std::endl;
 
-    g_readyPdbPath =
-        GetPdbPath(g_readyDllPath);
+        g_buildState =
+            BuildState::Pending;
+    }
+    else
+    {
+        std::cout
+            << "[INFO] Existing plugin build found."
+            << std::endl;
 
-    std::filesystem::copy_file(
-        pdbPath,
-        g_readyPdbPath,
-        std::filesystem::copy_options::overwrite_existing);
+        g_readyDllPath =
+            GenerateTempDllPath();
 
-    g_buildState =
-        BuildState::ReadyToLoad;
+        g_readyPdbPath =
+            GetPdbPath(g_readyDllPath);
 
-    // Worker and file watcher threads
+        std::error_code ec;
+
+        std::filesystem::copy_file(
+            libFilePath,
+            g_readyDllPath,
+            std::filesystem::copy_options::overwrite_existing,
+            ec);
+
+        if (ec)
+        {
+            std::cerr
+                << "[ERROR] Failed startup DLL copy: "
+                << ec.message()
+                << std::endl;
+
+            return 1;
+        }
+
+        ec.clear();
+
+        std::filesystem::copy_file(
+            pdbPath,
+            g_readyPdbPath,
+            std::filesystem::copy_options::overwrite_existing,
+            ec);
+
+        if (ec)
+        {
+            std::cerr
+                << "[ERROR] Failed startup PDB copy: "
+                << ec.message()
+                << std::endl;
+
+            return 1;
+        }
+
+        g_buildState =
+            BuildState::ReadyToLoad;
+    }
+
     std::thread buildThread(
         BuildWorkerThread,
         libFilePath,
@@ -620,17 +743,17 @@ int main()
 
     buildThread.detach();
 
-    WatchContext pluginSourceWatchContext;
-    WatchContext mirrorSourceWatchContext;
+    WatchContext pluginWatchContext;
+    WatchContext mirrorWatchContext;
 
-    setupFileWatcher(
-        pluginSourceWatchContext,
+    SetupFileWatcher(
+        pluginWatchContext,
         L"Plugin",
         WatchType::Source,
         false);
 
-    setupFileWatcher(
-        mirrorSourceWatchContext,
+    SetupFileWatcher(
+        mirrorWatchContext,
         L"Mirror",
         WatchType::Source,
         false);
@@ -671,7 +794,9 @@ int main()
         //
         // RELOAD PHASE
         //
-        if (g_buildState == BuildState::ReadyToLoad &&
+
+        if (g_buildState ==
+            BuildState::ReadyToLoad &&
             !reloadInProgress)
         {
             reloadInProgress = true;
@@ -680,10 +805,6 @@ int main()
 
             do
             {
-                //
-                // unload old dll
-                //
-
                 if (hLib)
                 {
                     std::cout
@@ -691,9 +812,7 @@ int main()
                         << std::endl;
 
                     run = nullptr;
-
-                    getMyStructTypeInfo =
-                        nullptr;
+                    getMyStructTypeInfo = nullptr;
 
                     FreeLibrary(hLib);
 
@@ -720,10 +839,6 @@ int main()
                     }
                 }
 
-                //
-                // grab worker-produced dll
-                //
-
                 std::filesystem::path readyDll;
 
                 {
@@ -733,10 +848,6 @@ int main()
                     readyDll =
                         g_readyDllPath;
                 }
-
-                //
-                // load dll
-                //
 
                 if (readyDll.empty())
                 {
@@ -764,10 +875,6 @@ int main()
                 currentLoadedDllPath =
                     readyDll;
 
-                //
-                // load exports
-                //
-
                 run =
                     (run_func)GetProcAddress(
                         hLib,
@@ -789,13 +896,12 @@ int main()
                 getMyStructTypeInfo =
                     (classInfo_func)GetProcAddress(
                         hLib,
-                        "myStructTypeInfo");
+                        "MyStructTypeInfo");
 
                 if (!getMyStructTypeInfo)
                 {
                     std::cerr
-                        << "[ERROR] Missing export: "
-                        << "myStructTypeInfo"
+                        << "[ERROR] Missing export: MyStructTypeInfo"
                         << std::endl;
 
                     FreeLibrary(hLib);
@@ -832,14 +938,35 @@ int main()
 
             if (getMyStructTypeInfo)
             {
-                if (latestSizeOfMyStruct != getMyStructTypeInfo()->size)
+                const auto* structTypeInfo =
+                    getMyStructTypeInfo();
+
+                if (structTypeInfo &&
+                    latestSizeOfMyStruct !=
+                    structTypeInfo->size)
                 {
-                    latestSizeOfMyStruct = getMyStructTypeInfo()->size;
+                    latestSizeOfMyStruct =
+                        structTypeInfo->size;
+
                     std::cout
-                        << "[INFO] Last size of MyStruct was "
+                        << "[INFO] MyStruct: "
                         << latestSizeOfMyStruct
-                        << " bytes"
+                        << " bytes\n"
                         << std::endl;
+
+                    for (size_t i = 0;
+                        i < structTypeInfo->fields.size();
+                        i++)
+                    {
+                        std::cout
+                            << structTypeInfo->fields[i].name
+                            << " "
+                            << structTypeInfo->fields[i].typeInfo->size
+                            << " bytes"
+                            << std::endl;
+                    }
+
+                    std::cout << std::endl;
                 }
             }
         }
@@ -847,12 +974,6 @@ int main()
         std::this_thread::sleep_for(
             std::chrono::milliseconds(10));
     }
-
-    CloseHandle(
-        pluginSourceWatchContext.dirHandle);
-
-    CloseHandle(
-        mirrorSourceWatchContext.dirHandle);
 
     return 0;
 }
