@@ -41,6 +41,7 @@ std::wstring PluginOutputDirectory()
 
 bool BuildPlugin(bool showOutput = false)
 {
+    // #TODO Look at using VCToolsInstallDir env var or "wehere msbuild" to find msbuild on local machine
     std::wstring command =
         L"\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe\" "
         L"Plugin\\Plugin.vcxproj "
@@ -112,8 +113,7 @@ enum class BuildState
 std::atomic<bool> sourceChanged = false;
 std::atomic<bool> reloadInProgress = false;
 
-std::atomic<BuildState> g_buildState =
-BuildState::Idle;
+std::atomic<BuildState> g_buildState = BuildState::Idle;
 
 std::chrono::steady_clock::time_point
 lastSourceChangeTime;
@@ -177,7 +177,6 @@ bool WaitForFileReady(
         if (file != INVALID_HANDLE_VALUE)
         {
             CloseHandle(file);
-
             return true;
         }
 
@@ -444,6 +443,7 @@ void CALLBACK DirectoryChangeCallback(
     if (!success)
     {
         std::cerr << "[ERROR] Failed to re-issue watch: " << GetLastError() << std::endl;
+        CancelIoEx(context->dirHandle, &context->overlapped);
         CloseHandle(context->dirHandle);
     }
 }
@@ -499,8 +499,8 @@ bool SetupFileWatcher(WatchContext& context, const std::wstring& directory, Watc
             << GetLastError()
             << std::endl;
 
+        CancelIoEx(context.dirHandle, &context.overlapped);
         CloseHandle(context.dirHandle);
-
         return false;
     }
 
@@ -510,7 +510,6 @@ bool SetupFileWatcher(WatchContext& context, const std::wstring& directory, Watc
 std::atomic<bool> g_buildWorkerThreadRunning = false;
 void BuildWorkerThread(const std::filesystem::path& libFilePath, const std::filesystem::path& pdbPath)
 {
-
     if (IsPluginBuildOutdated(libFilePath))
     {
         std::cout << "[INFO] Plugin build outdated. Queueing rebuild..." << std::endl;
@@ -521,7 +520,6 @@ void BuildWorkerThread(const std::filesystem::path& libFilePath, const std::file
         std::cout << "[INFO] Existing plugin build found." << std::endl;
 
         g_readyDllPath = GenerateTempDllPath();
-
         g_readyPdbPath = GetPdbPath(g_readyDllPath);
 
         std::error_code ec;
@@ -746,16 +744,17 @@ void TryReload()
         {
             std::cout << "[INFO] Reloading plugin..." << std::endl;
 
+            if (OnPreUnload && hasLoaded)
+            {
+                OnPreUnload();
+            }
+
             OnFirstLoaded = nullptr;
             OnPreUnload = nullptr;
             OnReloaded = nullptr;
 
             getStructTypeInfos = nullptr;
 
-            if (OnPreUnload && hasLoaded)
-            {
-                OnPreUnload();
-            }
             FreeLibrary(hLib);
 
             hLib = nullptr;
@@ -765,11 +764,8 @@ void TryReload()
             if (!currentLoadedDllPath.empty())
             {
                 std::error_code ec;
-
                 std::filesystem::remove(currentLoadedDllPath, ec);
-
-                auto tempPdb = GetPdbPath(currentLoadedDllPath);
-
+                std::filesystem::path tempPdb = GetPdbPath(currentLoadedDllPath);
                 std::filesystem::remove(tempPdb, ec);
             }
         }
@@ -862,7 +858,7 @@ void TryReload()
 
 void Loop()
 {
-
+    // std::cout << "Loop" << std::endl;
 }
 
 int main()
@@ -907,16 +903,13 @@ int main()
 
     while (true)
     {
-        SleepEx(10, TRUE);
-
         if (g_buildState == BuildState::ReadyToLoad && !reloadInProgress)
         {
             TryReload();
         }
 
         Loop();
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        SleepEx(10, TRUE);
     }
 
     g_buildWorkerThreadRunning = false;
