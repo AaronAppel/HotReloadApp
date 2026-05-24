@@ -106,7 +106,7 @@ struct Mirror
 	};
 #endif // MIR_OMIT_METHODS
 
-	struct TypeInfo
+	struct TypeInfo // #TODO Move nested type outside of Mirror so forward declarations can avoid full header includes
 	{
 		TypeInfo() : superTypeInfo(nullptr), typeDynamicCastFunc(nullptr) { }
 

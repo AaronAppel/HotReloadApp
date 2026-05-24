@@ -6,16 +6,15 @@
 #error Define EXPORT
 #endif
 
-extern "C" EXPORT void run();
-
-// extern "C" EXPORT void OnFirstLoaded();
-// extern "C" EXPORT void OnPreUnload();
-// extern "C" EXPORT void OnReloaded();
+extern "C" EXPORT void OnFirstLoaded();
+extern "C" EXPORT void OnPreUnload();
+extern "C" EXPORT void OnReloaded();
 
 extern "C" EXPORT void runAlternate();
 extern "C" EXPORT void runAlternate2();
 
 // #TODO How to forward declare?
+// Mirror needs to un-nest structs, but also need to check include and compile order and dependency flow
 // struct Mirror
 // {
 //     struct TypeInfo;

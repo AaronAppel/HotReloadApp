@@ -39,7 +39,7 @@ std::wstring PluginOutputDirectory()
     return L"Plugin\\x64\\Debug";
 }
 
-bool BuildPlugin()
+bool BuildPlugin(bool showOutput = false)
 {
     std::wstring command =
         L"\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe\" "
@@ -53,24 +53,22 @@ bool BuildPlugin()
 
     PROCESS_INFORMATION pi = {};
 
-    std::vector<wchar_t> cmd(
-        command.begin(),
-        command.end());
+    std::vector<wchar_t> cmd(command.begin(), command.end());
 
     cmd.push_back(L'\0');
 
-    BOOL success =
-        CreateProcessW(
-            nullptr,
-            cmd.data(),
-            nullptr,
-            nullptr,
-            FALSE,
-            0, // IMPORTANT: remove CREATE_NO_WINDOW
-            nullptr,
-            nullptr,
-            &si,
-            &pi);
+    BOOL success = CreateProcessW(
+        nullptr,
+        cmd.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        showOutput ? 0 : CREATE_NO_WINDOW,
+        nullptr,
+        nullptr,
+        &si,
+        &pi
+    );
 
     if (!success)
     {
@@ -106,7 +104,6 @@ bool BuildPlugin()
 enum class BuildState
 {
     Idle,
-    Pending,
     Building,
     ReadyToLoad,
     Failed
@@ -364,15 +361,9 @@ void CALLBACK DirectoryChangeCallback(
     DWORD bytesTransferred,
     LPOVERLAPPED lpOverlapped)
 {
-    auto* context =
-        CONTAINING_RECORD(
-            lpOverlapped,
-            WatchContext,
-            overlapped);
+    WatchContext* context = CONTAINING_RECORD(lpOverlapped, WatchContext, overlapped);
 
-    BYTE* base =
-        reinterpret_cast<BYTE*>(
-            context->buffer);
+    BYTE* base = reinterpret_cast<BYTE*>( context->buffer);
 
     if (errorCode != ERROR_SUCCESS)
     {
@@ -405,17 +396,23 @@ void CALLBACK DirectoryChangeCallback(
             if (HasExtension(changedFile, L".cpp") ||
                 HasExtension(changedFile, L".h"))
             {
-                sourceChanged = true;
-
-                lastSourceChangeTime =
-                    std::chrono::steady_clock::now();
-
-                if (!printOutAllChangedFilesOrDirs)
+                // #TODO Check what changed and ignore based on detected differences.
+                // May need to cache file and diff, ignoring changes to:
+                // - Whitespace, formatting, comments
+                // - Non-serialized, non-member field(s) or function(s) (like scoped variables) name changes
+                // - Default value changes
+                if (constexpr bool criticalChangeDetected = true)
                 {
-                    std::wcout
-                        << L"[INFO] Changed: "
-                        << changedFile
-                        << std::endl;
+                    sourceChanged = true;
+                    lastSourceChangeTime = std::chrono::steady_clock::now();
+
+                    if (!printOutAllChangedFilesOrDirs)
+                    {
+                        std::wcout
+                            << L"[INFO] Changed: "
+                            << changedFile
+                            << std::endl;
+                    }
                 }
             }
 
@@ -446,20 +443,12 @@ void CALLBACK DirectoryChangeCallback(
 
     if (!success)
     {
-        std::cerr
-            << "[ERROR] Failed to re-issue watch: "
-            << GetLastError()
-            << std::endl;
-
+        std::cerr << "[ERROR] Failed to re-issue watch: " << GetLastError() << std::endl;
         CloseHandle(context->dirHandle);
     }
 }
 
-bool SetupFileWatcher(
-    WatchContext& context,
-    const std::wstring& directory,
-    WatchType type,
-    bool watchSubDirs = true)
+bool SetupFileWatcher(WatchContext& context, const std::wstring& directory, WatchType type, bool watchSubDirs = true)
 {
     context.type = type;
 
@@ -518,120 +507,136 @@ bool SetupFileWatcher(
     return true;
 }
 
-void BuildWorkerThread(
-    const std::filesystem::path& libFilePath,
-    const std::filesystem::path& pdbPath)
+std::atomic<bool> g_buildWorkerThreadRunning = false;
+void BuildWorkerThread(const std::filesystem::path& libFilePath, const std::filesystem::path& pdbPath)
 {
-    while (true)
+
+    if (IsPluginBuildOutdated(libFilePath))
     {
-        if (g_buildState ==
-            BuildState::Pending)
+        std::cout << "[INFO] Plugin build outdated. Queueing rebuild..." << std::endl;
+        sourceChanged = true; // #TODO Don't rely on source change flag for startup build of stale library
+    }
+    else
+    {
+        std::cout << "[INFO] Existing plugin build found." << std::endl;
+
+        g_readyDllPath = GenerateTempDllPath();
+
+        g_readyPdbPath = GetPdbPath(g_readyDllPath);
+
+        std::error_code ec;
+        std::filesystem::copy_file(
+            libFilePath,
+            g_readyDllPath,
+            std::filesystem::copy_options::overwrite_existing,
+            ec
+        );
+
+        if (ec)
         {
-            g_buildState =
-                BuildState::Building;
-
-            std::cout
-                << "[INFO] Rebuilding plugin..."
-                << std::endl;
-
-            bool buildSuccess =
-                BuildPlugin();
-
-            if (!buildSuccess)
-            {
-                std::cerr
-                    << "[ERROR] Plugin build failed."
-                    << std::endl;
-
-                g_buildState =
-                    BuildState::Failed;
-
-                continue;
-            }
-
-            if (!WaitForFileReady(libFilePath))
-            {
-                std::cerr
-                    << "[ERROR] DLL never became ready."
-                    << std::endl;
-
-                g_buildState =
-                    BuildState::Failed;
-
-                continue;
-            }
-
-            if (!WaitForFileStable(pdbPath))
-            {
-                std::cerr
-                    << "[ERROR] PDB never became stable."
-                    << std::endl;
-
-                g_buildState =
-                    BuildState::Failed;
-
-                continue;
-            }
-
-            auto tempDll =
-                GenerateTempDllPath();
-
-            auto tempPdb =
-                GetPdbPath(tempDll);
-
-            std::error_code ec;
-
-            if (!std::filesystem::copy_file(
-                libFilePath,
-                tempDll,
-                std::filesystem::copy_options::overwrite_existing,
-                ec))
-            {
-                std::cerr
-                    << "[ERROR] Failed to copy DLL: "
-                    << ec.message()
-                    << std::endl;
-
-                g_buildState =
-                    BuildState::Failed;
-
-                continue;
-            }
-
-            ec.clear();
-
-            if (!std::filesystem::copy_file(
-                pdbPath,
-                tempPdb,
-                std::filesystem::copy_options::overwrite_existing,
-                ec))
-            {
-                std::cerr
-                    << "[ERROR] Failed to copy PDB: "
-                    << ec.message()
-                    << std::endl;
-
-                g_buildState = BuildState::Failed;
-
-                continue;
-            }
-
-            {
-                std::scoped_lock lock(
-                    g_readyDllMutex);
-
-                g_readyDllPath = tempDll;
-                g_readyPdbPath = tempPdb;
-            }
-
-            std::cout
-                << "[INFO] Plugin build succeeded."
-                << std::endl;
-
-            g_buildState = BuildState::ReadyToLoad;
+            std::cerr << "[ERROR] Failed startup DLL copy: " << ec.message() << std::endl;
+            return;
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        ec.clear();
+
+        std::filesystem::copy_file(
+            pdbPath,
+            g_readyPdbPath,
+            std::filesystem::copy_options::overwrite_existing,
+            ec);
+
+        if (ec)
+        {
+            std::cerr << "[ERROR] Failed startup PDB copy: " << ec.message() << std::endl;
+            return;
+        }
+
+        g_buildState = BuildState::ReadyToLoad;
+    }
+
+    // #TODO Review condition for stopping thread
+    while (g_buildWorkerThreadRunning)
+    {
+        constexpr long long pollingFrequencyMilliseconds = 10;
+        constexpr long long minMillisecondsSinceChange = 100;
+
+        if (!sourceChanged)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(pollingFrequencyMilliseconds));
+            continue;
+        }
+
+        const std::chrono::time_point now = std::chrono::steady_clock::now();
+
+        if (now - lastSourceChangeTime > std::chrono::milliseconds(minMillisecondsSinceChange))
+        {
+            sourceChanged = false;
+
+            // #TODO review idle and failed states
+            if (g_buildState == BuildState::Idle || g_buildState == BuildState::Failed)
+            {
+                g_buildState = BuildState::Building;
+
+                // #TODO Timestamps measuring recompile, copy, and reload times
+                std::cout << "[INFO] Rebuilding plugin..." << std::endl;
+
+                if (!BuildPlugin())
+                {
+                    std::cerr << "[ERROR] Plugin build failed." << std::endl;
+                    g_buildState = BuildState::Failed;
+                    continue;
+                }
+
+                if (!WaitForFileReady(libFilePath))
+                {
+                    std::cerr << "[ERROR] DLL never became ready." << std::endl;
+                    g_buildState = BuildState::Failed;
+                    continue;
+                }
+
+                if (!WaitForFileStable(pdbPath))
+                {
+                    std::cerr
+                        << "[ERROR] PDB never became stable."
+                        << std::endl;
+
+                    g_buildState = BuildState::Failed;
+                    continue;
+                }
+
+                std::filesystem::path tempDll = GenerateTempDllPath();
+                std::filesystem::path tempPdb = GetPdbPath(tempDll);
+
+                std::error_code ec;
+
+                if (!std::filesystem::copy_file(libFilePath, tempDll, std::filesystem::copy_options::overwrite_existing, ec))
+                {
+                    std::cerr << "[ERROR] Failed to copy DLL: " << ec.message() << std::endl;
+                    g_buildState = BuildState::Failed;
+                    continue;
+                }
+                ec.clear();
+
+                if (!std::filesystem::copy_file(pdbPath, tempPdb, std::filesystem::copy_options::overwrite_existing, ec))
+                {
+                    std::cerr << "[ERROR] Failed to copy PDB: " << ec.message() << std::endl;
+                    g_buildState = BuildState::Failed;
+                    continue;
+                }
+
+                {
+                    std::scoped_lock lock(g_readyDllMutex);
+                    g_readyDllPath = tempDll;
+                    g_readyPdbPath = tempPdb;
+                }
+
+                std::cout << "[INFO] Plugin build succeeded." << std::endl;
+                g_buildState = BuildState::ReadyToLoad;
+            }
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(pollingFrequencyMilliseconds));
     }
 }
 
@@ -659,121 +664,231 @@ Entity* GetEntity(int index)
     return &entities[index];
 }
 
+void PrintReflectionInfo(const std::vector<const Mir::TypeInfo*>& structTypeInfos)
+{
+    for (size_t i = 0; i < structTypeInfos.size(); i++)
+    {
+        const Mir::TypeInfo* typeInfo = structTypeInfos[i];
+        std::cout
+            << "[INFO] "
+            << typeInfo->stringName.c_str()
+            << ": "
+            << typeInfo->size
+            << " bytes\n"
+            << std::endl;
+
+        for (size_t i = 0; i < typeInfo->fields.size(); i++)
+        {
+            std::cout
+                << typeInfo->fields[i].name
+                << " "
+                << typeInfo->fields[i].typeInfo->size
+                << " bytes"
+                << std::endl;
+        }
+
+        std::cout << std::endl;
+    }
+}
+
+void PrintEntityState()
+{
+    std::cout
+        << "[INFO] Entity Count: "
+        << EntityCount()
+        << std::endl;
+
+    for (int i = 0; i < EntityCount(); i++)
+    {
+        Entity* entity = GetEntity(i);
+
+        std::cout
+            << "Entity "
+            << i
+            << " | Health: "
+            << entity->health
+            << " | Speed: "
+            << entity->speed
+            << " | "
+            << (entity->alive ? "\033[32mAlive\033[0m" : "\033[31mDead\033[0m")
+            << std::endl;
+    }
+    std::cout << std::endl;
+}
+
+HMODULE hLib = nullptr;
+
+using void_func = void(*)();
+
+void_func OnFirstLoaded = nullptr;
+void_func OnPreUnload = nullptr;
+void_func OnReloaded = nullptr;
+
+void_func run = nullptr;
+
+using classInfo_func = std::vector<const Mirror::TypeInfo*>(*)();
+classInfo_func getStructTypeInfos = nullptr;
+
+std::atomic<bool> hasLoaded = false;
+
+void TryReload()
+{
+    if (g_buildState != BuildState::ReadyToLoad || reloadInProgress)
+        return;
+
+    reloadInProgress = true;
+
+    bool reloadSucceeded = false;
+
+    do
+    {
+        if (hLib)
+        {
+            std::cout << "[INFO] Reloading plugin..." << std::endl;
+
+            OnFirstLoaded = nullptr;
+            OnPreUnload = nullptr;
+            OnReloaded = nullptr;
+
+            getStructTypeInfos = nullptr;
+
+            if (OnPreUnload && hasLoaded)
+            {
+                OnPreUnload();
+            }
+            FreeLibrary(hLib);
+
+            hLib = nullptr;
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+            if (!currentLoadedDllPath.empty())
+            {
+                std::error_code ec;
+
+                std::filesystem::remove(currentLoadedDllPath, ec);
+
+                auto tempPdb = GetPdbPath(currentLoadedDllPath);
+
+                std::filesystem::remove(tempPdb, ec);
+            }
+        }
+
+        std::filesystem::path readyDll;
+        {
+            std::scoped_lock lock(g_readyDllMutex);
+            readyDll = g_readyDllPath;
+        }
+
+        if (readyDll.empty())
+        {
+            std::cerr
+                << "[ERROR] No DLL ready to load."
+                << std::endl;
+
+            break;
+        }
+
+        hLib = LoadLibraryW(readyDll.c_str());
+        if (!hLib)
+        {
+            std::cerr
+                << "[ERROR] Failed to load DLL: "
+                << GetLastError()
+                << std::endl;
+
+            break;
+        }
+
+        currentLoadedDllPath = readyDll;
+
+        OnFirstLoaded = (void_func)GetProcAddress(hLib, "OnFirstLoaded");
+        OnPreUnload = (void_func)GetProcAddress(hLib, "OnPreUnload");
+        OnReloaded = (void_func)GetProcAddress(hLib, "OnReloaded");
+
+        if (!OnFirstLoaded || !OnPreUnload || !OnReloaded)
+        {
+            std::cerr << "[ERROR] Missing export function(s): OnFirstLoaded || OnPreUnload || OnReloaded" << std::endl;
+
+            FreeLibrary(hLib);
+
+            hLib = nullptr;
+
+            break;
+        }
+
+        getStructTypeInfos = (classInfo_func)GetProcAddress(hLib, "StructTypeInfos");
+        if (!getStructTypeInfos)
+        {
+            std::cerr << "[ERROR] Missing export: StructTypeInfos" << std::endl;
+
+            FreeLibrary(hLib);
+
+            hLib = nullptr;
+
+            break;
+        }
+
+        reloadSucceeded = true;
+
+        if (OnFirstLoaded && hasLoaded)
+        {
+            OnFirstLoaded();
+        }
+        else if (OnReloaded)
+        {
+            OnReloaded();
+        }
+        hasLoaded = true;
+
+    } while (false); // Supports early-out via break, so could just early return
+
+    reloadInProgress = false;
+
+    if (reloadSucceeded)
+    {
+        g_buildState = BuildState::Idle;
+
+        std::cout << "[INFO] Plugin reload succeeded." << std::endl;
+
+        if (getStructTypeInfos)
+        {
+            PrintReflectionInfo(getStructTypeInfos());
+        }
+
+        PrintEntityState();
+    }
+}
+
+void Loop()
+{
+
+}
+
 int main()
 {
-    for (auto& entry :
-        std::filesystem::directory_iterator(
-            std::filesystem::temp_directory_path()))
+    // Clean up old files in temp storage directory
+    std::filesystem::directory_iterator tempStorageDir = std::filesystem::directory_iterator(std::filesystem::temp_directory_path());
+    for (const std::filesystem::directory_entry& entry : tempStorageDir)
     {
-        auto name =
-            entry.path()
-            .filename()
-            .wstring();
+        const std::wstring name = entry.path().filename().wstring();
 
-        if (name.starts_with(
-            L"plugin_hotreload_"))
+        if (name.starts_with(L"plugin_hotreload_"))
         {
             std::error_code ec;
-
-            std::filesystem::remove(
-                entry.path(),
-                ec);
-
-            auto tempPdb =
-                GetPdbPath(entry.path());
-
-            std::filesystem::remove(
-                tempPdb,
-                ec);
+            std::filesystem::remove(entry.path(), ec);
+            std::filesystem::path tempPdb = GetPdbPath(entry.path());
+            std::filesystem::remove(tempPdb, ec);
         }
     }
 
-    HMODULE hLib = nullptr;
+    const std::filesystem::path libFilePath = L"Plugin\\x64\\Debug\\Plugin.dll";
+    const std::filesystem::path pdbPath = L"Plugin\\x64\\Debug\\Plugin.pdb";
 
-    using run_func = void(*)();
-    run_func run = nullptr;
+    g_buildWorkerThreadRunning = true;
+    std::thread buildThread(BuildWorkerThread, libFilePath, pdbPath);
 
-    using classInfo_func = std::vector<const Mirror::TypeInfo*>(*)();
-    classInfo_func getStructTypeInfos = nullptr;
-
-    bool hasRunSinceDllLoad = false;
-
-    std::filesystem::path libFilePath =
-        L"Plugin\\x64\\Debug\\Plugin.dll";
-
-    std::filesystem::path pdbPath =
-        L"Plugin\\x64\\Debug\\Plugin.pdb";
-
-    bool needsBuild =
-        IsPluginBuildOutdated(libFilePath);
-
-    if (needsBuild)
-    {
-        std::cout
-            << "[INFO] Plugin build outdated. Queueing rebuild..."
-            << std::endl;
-
-        g_buildState = BuildState::Pending;
-    }
-    else
-    {
-        std::cout
-            << "[INFO] Existing plugin build found."
-            << std::endl;
-
-        g_readyDllPath =
-            GenerateTempDllPath();
-
-        g_readyPdbPath =
-            GetPdbPath(g_readyDllPath);
-
-        std::error_code ec;
-
-        std::filesystem::copy_file(
-            libFilePath,
-            g_readyDllPath,
-            std::filesystem::copy_options::overwrite_existing,
-            ec);
-
-        if (ec)
-        {
-            std::cerr
-                << "[ERROR] Failed startup DLL copy: "
-                << ec.message()
-                << std::endl;
-
-            return 1;
-        }
-
-        ec.clear();
-
-        std::filesystem::copy_file(
-            pdbPath,
-            g_readyPdbPath,
-            std::filesystem::copy_options::overwrite_existing,
-            ec);
-
-        if (ec)
-        {
-            std::cerr
-                << "[ERROR] Failed startup PDB copy: "
-                << ec.message()
-                << std::endl;
-
-            return 1;
-        }
-
-        g_buildState = BuildState::ReadyToLoad;
-    }
-
-    std::thread buildThread(
-        BuildWorkerThread,
-        libFilePath,
-        pdbPath);
-
-    buildThread.detach();
-
-    WatchContext pluginWatchContext;
+    WatchContext pluginWatchContext; // #TODO Look at how these can be stopped early if needed
     WatchContext mirrorWatchContext;
 
     SetupFileWatcher(
@@ -788,240 +903,24 @@ int main()
         WatchType::Source,
         false);
 
-    std::cout
-        << "[INFO] Monitoring source changes..."
-        << std::endl;
+    std::cout << "[INFO] Monitoring source changes..." << std::endl;
 
     while (true)
     {
         SleepEx(10, TRUE);
 
-        //
-        // BUILD REQUEST PHASE
-        //
-
-        if (sourceChanged)
+        if (g_buildState == BuildState::ReadyToLoad && !reloadInProgress)
         {
-            auto now =
-                std::chrono::steady_clock::now();
-
-            if (now - lastSourceChangeTime >
-                std::chrono::milliseconds(100))
-            {
-                sourceChanged = false;
-
-                if (g_buildState ==
-                    BuildState::Idle ||
-                    g_buildState ==
-                    BuildState::Failed)
-                {
-                    g_buildState =
-                        BuildState::Pending;
-                }
-            }
+            TryReload();
         }
 
-        //
-        // RELOAD PHASE
-        //
+        Loop();
 
-        if (g_buildState ==
-            BuildState::ReadyToLoad &&
-            !reloadInProgress)
-        {
-            reloadInProgress = true;
-
-            bool reloadSucceeded = false;
-
-            do
-            {
-                if (hLib)
-                {
-                    std::cout
-                        << "[INFO] Reloading plugin..."
-                        << std::endl;
-
-                    run = nullptr;
-                    getStructTypeInfos = nullptr;
-
-                    FreeLibrary(hLib);
-
-                    hLib = nullptr;
-
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(10));
-
-                    if (!currentLoadedDllPath.empty())
-                    {
-                        std::error_code ec;
-
-                        std::filesystem::remove(
-                            currentLoadedDllPath,
-                            ec);
-
-                        auto tempPdb =
-                            GetPdbPath(
-                                currentLoadedDllPath);
-
-                        std::filesystem::remove(
-                            tempPdb,
-                            ec);
-                    }
-                }
-
-                std::filesystem::path readyDll;
-
-                {
-                    std::scoped_lock lock(
-                        g_readyDllMutex);
-
-                    readyDll =
-                        g_readyDllPath;
-                }
-
-                if (readyDll.empty())
-                {
-                    std::cerr
-                        << "[ERROR] No DLL ready to load."
-                        << std::endl;
-
-                    break;
-                }
-
-                hLib =
-                    LoadLibraryW(
-                        readyDll.c_str());
-
-                if (!hLib)
-                {
-                    std::cerr
-                        << "[ERROR] Failed to load DLL: "
-                        << GetLastError()
-                        << std::endl;
-
-                    break;
-                }
-
-                currentLoadedDllPath =
-                    readyDll;
-
-                run = (run_func)GetProcAddress(hLib, "run");
-
-                if (!run)
-                {
-                    std::cerr
-                        << "[ERROR] Missing export: run"
-                        << std::endl;
-
-                    FreeLibrary(hLib);
-
-                    hLib = nullptr;
-
-                    break;
-                }
-
-                getStructTypeInfos =
-                    (classInfo_func)GetProcAddress(
-                        hLib,
-                        "StructTypeInfos");
-
-                if (!getStructTypeInfos)
-                {
-                    std::cerr
-                        << "[ERROR] Missing export: StructTypeInfos"
-                        << std::endl;
-
-                    FreeLibrary(hLib);
-
-                    hLib = nullptr;
-
-                    break;
-                }
-
-                reloadSucceeded = true;
-
-            } while (false);
-
-            reloadInProgress = false;
-
-            if (reloadSucceeded)
-            {
-                g_buildState =
-                    BuildState::Idle;
-
-                std::cout
-                    << "[INFO] Plugin reload succeeded."
-                    << std::endl;
-                hasRunSinceDllLoad = false;
-            }
-        }
-
-        //
-        // RUN PHASE
-        //
-
-        if (run)
-        {
-            run();
-
-            if (getStructTypeInfos && !hasRunSinceDllLoad)
-            {
-                hasRunSinceDllLoad = true;
-
-                // Print reflection info
-                std::vector<const Mir::TypeInfo*> structTypeInfos = getStructTypeInfos();
-                for (size_t i = 0; i < structTypeInfos.size(); i++)
-                {
-                    const Mir::TypeInfo* typeInfo = structTypeInfos[i];
-                    std::cout
-                        << "[INFO] "
-                        << typeInfo->stringName.c_str()
-                        << ": "
-                        << typeInfo->size
-                        << " bytes\n"
-                        << std::endl;
-
-                    for (size_t i = 0; i < typeInfo->fields.size(); i++)
-                    {
-                        std::cout
-                            << typeInfo->fields[i].name
-                            << " "
-                            << typeInfo->fields[i].typeInfo->size
-                            << " bytes"
-                            << std::endl;
-                    }
-
-                    std::cout << std::endl;
-                }
-
-                // Modify state
-                std::cout
-                    << "[INFO] Entity Count: "
-                    << EntityCount()
-                    << std::endl;
-
-                for (int i = 0; i < EntityCount(); i++)
-                {
-                    Entity* entity = GetEntity(i);
-
-                    std::cout
-                        << "Entity "
-                        << i
-                        << " | Health: "
-                        << entity->health
-                        << " | Speed: "
-                        << entity->speed
-                        << " | "
-                        << (entity->alive ? "\033[32mAlive\033[0m" : "\033[31mDead\033[0m")
-                        << std::endl;
-                }
-                std::cout << std::endl;
-            }
-        }
-
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+
+    g_buildWorkerThreadRunning = false;
+    buildThread.join();
 
     entities.clear();
 
